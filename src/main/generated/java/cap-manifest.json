@@ -3,7 +3,7 @@
   "stamp" : {
     "validated" : true,
     "compositionVersion" : "0.0.0",
-    "contentBinding" : "sha256:f40f45fcf50268c1ef985e26e627ecbdc7b6da75c23dc1bdb2e7c52581220120"
+    "contentBinding" : "sha256:64dd421233be12e75178866049873329469ab88573ce6519a4e0e8d974a6a848"
   },
   "modules" : [
     {
@@ -14,16 +14,34 @@
         "provides" : [
           {
             "service" : "eu.exeris.caps.jwt.api.JwtAdmissionPolicy",
-            "version" : "1.0.0"
+            "version" : "2.0.0"
           }
         ],
-        "requires" : [ ]
+        "requires" : [
+          {
+            "service" : "eu.exeris.caps.serviceboundarycore.api.RequestFilterChain",
+            "versionRange" : "[1.1.0,2.0.0)",
+            "optional" : true
+          }
+        ],
+        "lifecycleOwner" : "eu.exeris.caps.jwt.JwtValidationModule"
       }
     }
   ],
-  "resolutions" : [ ],
+  "resolutions" : [
+    {
+      "module" : "eu.exeris.caps.jwt.JwtValidationModule",
+      "service" : "eu.exeris.caps.serviceboundarycore.api.RequestFilterChain",
+      "versionRange" : "[1.1.0,2.0.0)",
+      "optional" : true,
+      "satisfied" : false,
+      "providers" : [ ]
+    }
+  ],
   "initOrder" : [
     "eu.exeris.caps.jwt.JwtValidationModule"
   ],
-  "warnings" : [ ]
+  "warnings" : [
+    "module eu.exeris.caps.jwt.JwtValidationModule @Requires service eu.exeris.caps.serviceboundarycore.api.RequestFilterChain version [1.1.0,2.0.0) but no @CapabilityModule provides it (optional — skipped)"
+  ]
 }
