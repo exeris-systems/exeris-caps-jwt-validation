@@ -7,19 +7,19 @@ package eu.exeris.caps.jwt.api;
  */
 public enum JwtValidationStatus {
 
-    /** Token is syntactically valid, untampered, within validity window, and matches criteria. */
+    /** Token is well-formed, verified against a published key, within its validity window, and for this audience. */
     VALID,
 
     /** Authorization header or token is absent. */
     MISSING_TOKEN,
 
-    /** Token does not conform to 3-part compact JWT format or JSON claims are malformed. */
+    /** Token is not a compact JWS, a segment is not Base64URL, or the header or claims are not a JSON object. */
     MALFORMED,
 
-    /** Token has expired ({@code exp} timestamp is in the past). */
+    /** Token has expired ({@code exp} is in the past beyond the permitted clock skew). */
     EXPIRED,
 
-    /** Token is not yet valid ({@code nbf} timestamp is in the future). */
+    /** Token is not yet valid ({@code nbf}, or {@code iat}, is in the future beyond the permitted clock skew). */
     PREMATURE,
 
     /** Cryptographic signature check failed (token was forged or tampered with). */
@@ -28,6 +28,15 @@ public enum JwtValidationStatus {
     /** Token issuer ({@code iss}) does not match the configured expected issuer. */
     UNAUTHORIZED_ISSUER,
 
-    /** Token audience ({@code aud}) does not match the configured expected audience. */
-    UNAUTHORIZED_AUDIENCE
+    /** Token audience ({@code aud}) does not contain the configured expected audience. */
+    UNAUTHORIZED_AUDIENCE,
+
+    /** The header carries no {@code kid}, or the issuer publishes no key with that {@code kid}. */
+    UNKNOWN_KEY,
+
+    /** The header's {@code alg} is not the algorithm the key is bound to, or is not an accepted algorithm. */
+    ALGORITHM_MISMATCH,
+
+    /** A claim the policy requires ({@code exp}, {@code sub}) is absent or has the wrong type. */
+    MISSING_CLAIM
 }
