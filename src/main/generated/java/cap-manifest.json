@@ -1,0 +1,29 @@
+{
+  "schemaVersion" : 2,
+  "stamp" : {
+    "validated" : true,
+    "compositionVersion" : "0.0.0",
+    "contentBinding" : "sha256:f40f45fcf50268c1ef985e26e627ecbdc7b6da75c23dc1bdb2e7c52581220120"
+  },
+  "modules" : [
+    {
+      "name" : "JwtValidationModule",
+      "packageName" : "eu.exeris.caps.jwt",
+      "qualifiedName" : "eu.exeris.caps.jwt.JwtValidationModule",
+      "module" : {
+        "provides" : [
+          {
+            "service" : "eu.exeris.caps.jwt.api.JwtAdmissionPolicy",
+            "version" : "1.0.0"
+          }
+        ],
+        "requires" : [ ]
+      }
+    }
+  ],
+  "resolutions" : [ ],
+  "initOrder" : [
+    "eu.exeris.caps.jwt.JwtValidationModule"
+  ],
+  "warnings" : [ ]
+}
