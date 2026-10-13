@@ -13,7 +13,8 @@ import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
- * Fetches a JWKS document over HTTPS with a bounded connect and response time and a bounded body size.
+ * Fetches a JWKS document over HTTPS, or HTTP on a loopback host, with a bounded connect and response
+ * time and a bounded body size.
  *
  * <p>Uses the JDK HTTP client, so the capability keeps no runtime dependency. A fetch that times out,
  * answers anything but 200, or exceeds the size bound throws; {@link JwksKeySet} then keeps the keys it
