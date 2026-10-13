@@ -22,7 +22,7 @@ import java.util.function.Supplier;
  *
  * <p>A policy verifies EdDSA (Ed25519) tokens against the issuer's JWKS (ADR-099 obligation 8). RS256 is
  * accepted only when {@link Builder#acceptRs256()} is called. Every policy names exactly one key source, the
- * expected issuer and the expected audience; {@code exp} is always required.
+ * expected issuer and the expected audience; {@code exp} and {@code nbf} are always required.
  *
  * <p>{@link #fromProperties(Map, Supplier)} reads the same settings from configuration; its keys are the
  * {@code KEY_*} constants of this class.
@@ -41,7 +41,7 @@ public final class JwtAdmissionPolicies {
     public static final String KEY_ALGORITHMS = "exeris.caps.jwt.algorithms";
     /** Permitted clock skew in seconds, applied to {@code exp}, {@code nbf} and {@code iat}; default 30, at most 300. */
     public static final String KEY_CLOCK_SKEW_SECONDS = "exeris.caps.jwt.clock-skew-seconds";
-    /** Claim holding the tenant id; default {@code tenant_id}. */
+    /** Claim holding the tenant id, a single string the issuer omits when there is no tenant; default {@code tid}. */
     public static final String KEY_TENANT_CLAIM = "exeris.caps.jwt.tenant-claim";
     /** JWKS connect and response timeout in milliseconds; default 2000. */
     public static final String KEY_JWKS_TIMEOUT_MILLIS = "exeris.caps.jwt.jwks-timeout-millis";
@@ -51,7 +51,7 @@ public final class JwtAdmissionPolicies {
     public static final String KEY_JWKS_MIN_REFRESH_SECONDS = "exeris.caps.jwt.jwks-min-refresh-seconds";
 
     /** Default name of the tenant claim. */
-    public static final String DEFAULT_TENANT_CLAIM = "tenant_id";
+    public static final String DEFAULT_TENANT_CLAIM = "tid";
 
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(5);
     private static final Set<String> SUPPORTED_ALGORITHMS = Set.of("EdDSA", "RS256");

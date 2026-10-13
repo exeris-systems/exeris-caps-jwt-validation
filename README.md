@@ -21,7 +21,7 @@ Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API
 3. key — the issuer's key with that `kid`, from its JWKS;
 4. algorithm — the header's `alg` must be the algorithm the key is bound to (Ed25519 → `EdDSA`, RSA ≥ 2048 bits → `RS256`) and an accepted one; `EdDSA` is accepted by default and `RS256` only when configured;
 5. signature;
-6. claims, read only after the signature — `iss`, `aud`, `exp` (required), `nbf`, and `iat` not in the future, all with one clock skew of at most five minutes; `sub` is required.
+6. claims, read only after the signature — `iss`, `aud`, `exp` and `nbf` (both required), and `iat` not in the future, all with one clock skew of at most five minutes; `sub` is required.
 
 No verification result is cached: every request verifies its token's signature. The JWKS is fetched with a connect and response timeout, reloaded when older than the refresh interval, and reloaded for an unknown `kid` at most once per minimum refresh interval. A failed reload keeps the previous keys.
 
@@ -40,7 +40,7 @@ No verification result is cached: every request verifies its token's signature. 
 | `exeris.caps.jwt.jwks-uri` | – | issuer JWKS; `https`, or `http` on loopback; without it the in-process JWKS supplier is used |
 | `exeris.caps.jwt.algorithms` | `EdDSA` | accepted algorithms, `EdDSA` and optionally `RS256` |
 | `exeris.caps.jwt.clock-skew-seconds` | `30` | skew on `exp`, `nbf`, `iat`; at most 300 |
-| `exeris.caps.jwt.tenant-claim` | `tenant_id` | claim carrying the tenant id |
+| `exeris.caps.jwt.tenant-claim` | `tid` | claim carrying the tenant id: one string, absent when the token has no tenant (token-issuer `TokenIssueRequest.TENANT_CLAIM`) |
 | `exeris.caps.jwt.jwks-timeout-millis` | `2000` | JWKS connect and response timeout |
 | `exeris.caps.jwt.jwks-refresh-seconds` | `300` | JWKS age that triggers a reload |
 | `exeris.caps.jwt.jwks-min-refresh-seconds` | `30` | minimum spacing of reloads, including unknown-`kid` reloads |

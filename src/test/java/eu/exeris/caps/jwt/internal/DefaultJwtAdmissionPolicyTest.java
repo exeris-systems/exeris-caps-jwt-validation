@@ -48,8 +48,13 @@ class DefaultJwtAdmissionPolicyTest {
         return POLICY.validateToken(token).status();
     }
 
+    /** Fills the placeholders, and adds an nbf in the past unless the test sets its own or names NO_NBF. */
     private static String claims(String json) {
-        return json.replace("ISS", ISSUER).replace("AUD", AUDIENCE).replace("SUB", SUBJECT);
+        String filled = json.replace("ISS", ISSUER).replace("AUD", AUDIENCE).replace("SUB", SUBJECT);
+        if (filled.contains("NO_NBF")) {
+            return filled.replace(",\"NO_NBF\":0", "");
+        }
+        return filled.contains("\"nbf\"") ? filled : "{\"nbf\":" + (NOW - 10) + "," + filled.substring(1);
     }
 
     @Test
@@ -135,6 +140,38 @@ class DefaultJwtAdmissionPolicyTest {
         void missingKid() {
             String token = TestTokens.sign("{\"alg\":\"EdDSA\"}", validClaims(), "Ed25519", ED.getPrivate());
             assertThat(status(token)).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+        }
+
+        @Test
+        @DisplayName("an unknown kid refetches the JWKS, at most once per minimum refresh interval")
+        void unknownKidRefetches() {
+            KeyPair rotated = TestTokens.ed25519();
+            java.util.concurrent.atomic.AtomicReference<String> published =
+                    new java.util.concurrent.atomic.AtomicReference<>(TestTokens.jwks(TestTokens.okpJwk("ed-1", ED)));
+            java.util.concurrent.atomic.AtomicInteger fetches = new java.util.concurrent.atomic.AtomicInteger();
+            java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+            JwtAdmissionPolicy policy = JwtAdmissionPolicies.builder()
+                    .jwksSupplier(() -> {
+                        fetches.incrementAndGet();
+                        return published.get();
+                    })
+                    .expectedIssuer(ISSUER)
+                    .expectedAudience(AUDIENCE)
+                    .clock(Clock.fixed(Instant.ofEpochSecond(NOW), ZoneOffset.UTC))
+                    .nanoClock(nanos::get)
+                    .build();
+            String rotatedToken = TestTokens.eddsa("ed-2", rotated.getPrivate(), validClaims());
+
+            assertThat(policy.validateToken(rotatedToken).status()).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+            assertThat(fetches).hasValue(1);
+
+            published.set(TestTokens.jwks(TestTokens.okpJwk("ed-1", ED), TestTokens.okpJwk("ed-2", rotated)));
+            assertThat(policy.validateToken(rotatedToken).status()).as("within the minimum interval").isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+            assertThat(fetches).hasValue(1);
+
+            nanos.addAndGet(Duration.ofSeconds(30).toNanos());
+            assertThat(policy.validateToken(rotatedToken).status()).isEqualTo(JwtValidationStatus.VALID);
+            assertThat(fetches).hasValue(2);
         }
 
         @Test
@@ -281,6 +318,15 @@ class DefaultJwtAdmissionPolicyTest {
         }
 
         @Test
+        @DisplayName("a token without nbf is refused")
+        void missingNbf() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"NO_NBF\":0}"))
+                    .isEqualTo(JwtValidationStatus.MISSING_CLAIM);
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"nbf\":\"" + NOW + "\"}"))
+                    .isEqualTo(JwtValidationStatus.MISSING_CLAIM);
+        }
+
+        @Test
         void issuedInFuture() {
             assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 600) + ",\"iat\":" + (NOW + 31) + "}"))
                     .isEqualTo(JwtValidationStatus.PREMATURE);
@@ -299,12 +345,16 @@ class DefaultJwtAdmissionPolicyTest {
         }
 
         @Test
-        @DisplayName("the tenant claim name is configurable")
+        @DisplayName("the tenant is read from tid by default, and the claim name is configurable")
         void configurableTenantClaim() {
-            JwtAdmissionPolicy policy = base().tenantClaim("tid").build();
             String token = TestTokens.eddsa("ed-1", ED.getPrivate(),
                     claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"tid\":\"t-1\",\"tenant_id\":\"t-2\"}"));
-            assertThat(policy.validateToken(token).tenantId()).isEqualTo("t-1");
+            assertThat(POLICY.validateToken(token).tenantId()).isEqualTo("t-1");
+            assertThat(base().tenantClaim("tenant_id").build().validateToken(token).tenantId()).isEqualTo("t-2");
+
+            String legacy = TestTokens.eddsa("ed-1", ED.getPrivate(),
+                    claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"tenant_id\":\"t-2\"}"));
+            assertThat(POLICY.validateToken(legacy).tenantId()).as("no tenant_id fallback").isNull();
         }
     }
 
@@ -358,7 +408,8 @@ class DefaultJwtAdmissionPolicyTest {
                     JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
                     JwtAdmissionPolicies.KEY_ALGORITHMS, "EdDSA, RS256"), () -> JWKS);
             String rs = TestTokens.rs256("rsa-1", RSA.getPrivate(),
-                    claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (Instant.now().getEpochSecond() + 60) + "}"));
+                    claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (Instant.now().getEpochSecond() + 60)
+                            + ",\"nbf\":" + (Instant.now().getEpochSecond() - 10) + "}"));
             assertThat(policy.validateToken(rs).status()).isEqualTo(JwtValidationStatus.VALID);
         }
     }

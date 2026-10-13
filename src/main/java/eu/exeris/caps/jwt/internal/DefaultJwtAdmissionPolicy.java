@@ -26,7 +26,7 @@ import java.util.Set;
  *   <li>key: the issuer's key with that {@code kid}, from the JWKS;</li>
  *   <li>algorithm: the header's {@code alg} must equal the algorithm the key is bound to, and be accepted;</li>
  *   <li>signature, with the key and that algorithm only;</li>
- *   <li>the claims, read only now: {@code iss}, {@code aud}, {@code exp} (required), {@code nbf}, and
+ *   <li>the claims, read only now: {@code iss}, {@code aud}, {@code exp} and {@code nbf} (both required), and
  *       {@code iat} not in the future, each with the same bounded clock skew.</li>
  * </ol>
  * The algorithm is never taken from the token on its own, so a token cannot choose how it is verified.
@@ -152,9 +152,11 @@ public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy {
         if (now > exp + skewSeconds) {
             return JwtValidationResult.failure(JwtValidationStatus.EXPIRED, "Token has expired");
         }
-        Object nbf = claims.get("nbf");
-        if (nbf != null && (!(nbf instanceof Long nbfSeconds) || nbfSeconds - skewSeconds > now)) {
-            return JwtValidationResult.failure(JwtValidationStatus.PREMATURE, "Token nbf is in the future or not an integer");
+        if (!(claims.get("nbf") instanceof Long nbf)) {
+            return JwtValidationResult.failure(JwtValidationStatus.MISSING_CLAIM, "Token has no integer nbf");
+        }
+        if (nbf - skewSeconds > now) {
+            return JwtValidationResult.failure(JwtValidationStatus.PREMATURE, "Token nbf is in the future");
         }
         Object iat = claims.get("iat");
         if (iat != null && (!(iat instanceof Long iatSeconds) || iatSeconds - skewSeconds > now)) {

@@ -37,6 +37,6 @@ public enum JwtValidationStatus {
     /** The header's {@code alg} is not the algorithm the key is bound to, or is not an accepted algorithm. */
     ALGORITHM_MISMATCH,
 
-    /** A claim the policy requires ({@code exp}, {@code sub}) is absent or has the wrong type. */
+    /** A claim the policy requires ({@code exp}, {@code nbf}, {@code sub}) is absent or has the wrong type. */
     MISSING_CLAIM
 }

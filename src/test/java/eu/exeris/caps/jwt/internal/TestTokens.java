@@ -63,7 +63,7 @@ public final class TestTokens {
     /** Claims of a token that the default test policy accepts at {@link #NOW}. */
     public static String validClaims() {
         return "{\"iss\":\"" + ISSUER + "\",\"aud\":\"" + AUDIENCE + "\",\"sub\":\"" + SUBJECT
-                + "\",\"tenant_id\":\"" + TENANT + "\",\"sid\":\"" + SESSION
+                + "\",\"tid\":\"" + TENANT + "\",\"sid\":\"" + SESSION
                 + "\",\"roles\":[\"owner\",\"admin\"],\"scope\":\"tenants:read tenants:write\""
                 + ",\"iat\":" + (NOW - 10) + ",\"nbf\":" + (NOW - 10) + ",\"exp\":" + (NOW + 300) + "}";
     }
