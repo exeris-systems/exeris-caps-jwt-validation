@@ -8,8 +8,8 @@ Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API
 
 - **Layer:** Layer 3 — Gateway policy, in the Tier 2 capability map of [`high-level-architecture.md`](https://github.com/exeris-systems/exeris-docs/blob/main/high-level-architecture.md) §3.2.
 - **Depends on:** `exeris-kernel-spi`, `exeris-sdk-composition-lifecycle` and `exeris-caps-service-boundary-core`, all at `provided` scope, so the jar carries no runtime dependency.
-- **Provides** (`@Provides`): `JwtAdmissionPolicy` 2.0.0.
-- **Requires** (`@Requires`, optional): `RequestFilterChain` `[1.1.0,2.0.0)` from `exeris-caps-service-boundary-core`. ADR-099 obligation 4 also names the gateway's `policy-chain` as an optional host; no published capability provides it yet, so that binding does not exist.
+- **Provides** (`@Provides`): `JwtAdmissionPolicy` 0.1.0.
+- **Requires** (`@Requires`, optional): `RequestFilterChain` `[0.1.0,0.2.0)` from `exeris-caps-service-boundary-core`. ADR-099 obligation 4 also names the gateway's `policy-chain` as an optional host; no published capability provides it yet, so that binding does not exist.
 - **Wall (ADR-055):** `eu.exeris.caps.jwt.api` is the cross-cap surface; `eu.exeris.caps.jwt.internal` is private, and a sibling cap reaching into it fails the build. No Spring, servlet, Netty or reactive type may appear (ADR-006).
 
 ## Verification

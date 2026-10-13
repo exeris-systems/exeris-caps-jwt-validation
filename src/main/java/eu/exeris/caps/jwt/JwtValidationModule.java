@@ -26,8 +26,8 @@ import java.time.Duration;
  */
 @CapabilityModule
 @CapabilityLifecycle
-@Provides(service = JwtAdmissionPolicy.class, version = "2.0.0")
-@Requires(service = RequestFilterChain.class, versionRange = "[1.1.0,2.0.0)", optional = true)
+@Provides(service = JwtAdmissionPolicy.class, version = "0.1.0")
+@Requires(service = RequestFilterChain.class, versionRange = "[0.1.0,0.2.0)", optional = true)
 public final class JwtValidationModule implements CapabilityLifecycleHooks {
 
     private final AdmissionHostBinding binding;
