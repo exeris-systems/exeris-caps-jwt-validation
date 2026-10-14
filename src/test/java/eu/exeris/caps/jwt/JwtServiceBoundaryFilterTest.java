@@ -89,7 +89,21 @@ class JwtServiceBoundaryFilterTest {
         assertThat(principal.sessionId()).contains(UUID.fromString(TestTokens.SESSION));
         assertThat(principal.roles()).containsExactlyInAnyOrder("owner", "admin");
         assertThat(principal.scopes()).containsExactlyInAnyOrder("tenants:read", "tenants:write");
-        assertThat(context.tenantId()).isEqualTo(TestTokens.TENANT);
+        assertThat(context.tenantId()).contains(TestTokens.TENANT);
+        assertThat(context.sessionId()).contains(UUID.fromString(TestTokens.SESSION));
+    }
+
+    @Test
+    @DisplayName("a verified token without a sid claim leaves the session id empty")
+    void tokenWithoutSession() {
+        String claims = TestTokens.validClaims().replace(",\"sid\":\"" + TestTokens.SESSION + "\"", "");
+        RecordingExchange exchange = send(HttpMethod.GET, "/me",
+                "Bearer " + TestTokens.eddsa("ed-1", ED.getPrivate(), claims));
+
+        assertThat(exchange.status).isEqualTo(HttpStatus.OK);
+        assertThat(seen.get().principal()).isPresent();
+        assertThat(seen.get().tenantId()).contains(TestTokens.TENANT);
+        assertThat(seen.get().sessionId()).isEmpty();
     }
 
     @Test

@@ -15,12 +15,15 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Service Boundary admission filter that authenticates the caller from a bearer access token.
  *
  * <p>On a verified token it records a {@link JwtPrincipal} through {@link AdmissionContext}, which is how
- * the principal reaches the handler's {@code RequestContext}. On any failure it answers 401 with a fixed
+ * the principal and its tenant reach the handler's {@code RequestContext}. The token's {@code sid} claim,
+ * when present, is recorded in the same call and becomes {@code RequestContext.sessionId()}; a token without
+ * one leaves the session id empty. On any failure it answers 401 with a fixed
  * problem body. A route listed as anonymous admits a request without a token; a token that is present
  * is verified on every route, so a bad credential is never silently treated as no credential.
  *
@@ -81,7 +84,13 @@ public final class JwtAdmissionFilter implements AdmissionFilter {
             ProblemResponses.send(exchange, HttpStatus.UNAUTHORIZED, DETAIL, INVALID_TOKEN_CHALLENGE);
             return false;
         }
-        AdmissionContext.current().authenticate(principal.get());
+        JwtPrincipal verified = principal.get();
+        Optional<UUID> session = verified.sessionId();
+        if (session.isPresent()) {
+            AdmissionContext.current().authenticate(verified, session.get());
+        } else {
+            AdmissionContext.current().authenticate(verified);
+        }
         return true;
     }
 
