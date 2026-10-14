@@ -1,6 +1,6 @@
 # exeris-caps-jwt-validation
 
-JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, fetched by the capability itself from the configured `jwks-uri` within the bounds in [JWKS fetch](#jwks-fetch), and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It owns no inbound transport.
+JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, fetched by the capability itself from the configured `jwks-uri` within the bounds in [JWKS fetch](#jwks-fetch), and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It binds inbound only through the Service Boundary admission filter and owns no other inbound transport.
 
 Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API is not stable and no artefact has been published.
 
