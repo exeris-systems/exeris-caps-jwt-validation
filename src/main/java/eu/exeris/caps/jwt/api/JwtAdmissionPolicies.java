@@ -43,7 +43,7 @@ public final class JwtAdmissionPolicies {
     public static final String KEY_CLOCK_SKEW_SECONDS = "exeris.caps.jwt.clock-skew-seconds";
     /** Claim holding the tenant id, a single string the issuer omits when there is no tenant; default {@code tid}. */
     public static final String KEY_TENANT_CLAIM = "exeris.caps.jwt.tenant-claim";
-    /** JWKS connect and response timeout in milliseconds; default 2000. */
+    /** Deadline of the whole JWKS fetch in milliseconds; default 2000. */
     public static final String KEY_JWKS_TIMEOUT_MILLIS = "exeris.caps.jwt.jwks-timeout-millis";
     /** Age in seconds after which the JWKS is reloaded; default 300. */
     public static final String KEY_JWKS_REFRESH_SECONDS = "exeris.caps.jwt.jwks-refresh-seconds";
@@ -140,7 +140,7 @@ public final class JwtAdmissionPolicies {
         private Builder() {
         }
 
-        /** Fetches the issuer's JWKS from this URI, with the configured timeout. */
+        /** Fetches the issuer's JWKS from this URI, with the configured deadline for the whole fetch. */
         public Builder jwksUri(URI uri) {
             this.jwksUri = Objects.requireNonNull(uri, "uri");
             return this;

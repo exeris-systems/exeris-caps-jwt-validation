@@ -1,6 +1,6 @@
 # exeris-caps-jwt-validation
 
-JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It owns no transport.
+JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, fetched by the capability itself from the configured `jwks-uri` within the bounds in [JWKS fetch](#jwks-fetch), and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It owns no inbound transport.
 
 Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API is not stable and no artefact has been published.
 
@@ -23,11 +23,23 @@ Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API
 5. signature;
 6. claims, read only after the signature — `iss`, `aud`, `exp` and `nbf` (both required), and `iat` not in the future, all with one clock skew of at most five minutes; `sub` is required.
 
-No verification result is cached: every request verifies its token's signature. The JWKS is fetched with a connect and response timeout, reloaded when older than the refresh interval, and reloaded for an unknown `kid` at most once per minimum refresh interval. A failed reload keeps the previous keys.
+No verification result is cached: every request verifies its token's signature.
+
+## JWKS fetch
+
+The capability fetches the issuer's JWKS itself; the verification decision reads no network. The fetch is bounded:
+
+- it goes only to the configured `exeris.caps.jwt.jwks-uri`, over HTTPS or, on a loopback host, HTTP, and follows no redirect;
+- one deadline covers the whole fetch, connecting, headers and body (`jwks-timeout-millis`);
+- the body is capped at 64 KiB, enforced while it streams;
+- a refresh is single-flight: concurrent requests share one fetch. Keys are reloaded when older than `jwks-refresh-seconds`, and an unknown `kid` triggers a reload at most once per `jwks-min-refresh-seconds`;
+- a failed fetch keeps the previous keys.
+
+Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `Supplier<String>`.
 
 ## Service Boundary filter
 
-`JwtServiceBoundaryBinding.of(chain, policy, anonymousRoutes)` builds the binding, and `new JwtValidationModule(binding)` attaches it at `initialize()`. The filter runs in the `AUTHENTICATION` phase. On a verified token it records a `JwtPrincipal` — subject, tenant, session id, roles and scopes, all UUID-typed where the kernel's `PrincipalContext` asks for it — through `AdmissionContext`, and the route handler reads it from `RequestContext.current().principal()`. That is the only source of the caller's identity a route may use. On any failure the filter answers `401` with `WWW-Authenticate: Bearer` and a fixed `application/problem+json` body that names nothing about the token. A route listed as anonymous admits a request without a token; a token that is present is verified on every route. A module with no binding refuses to initialise.
+`JwtServiceBoundaryBinding.of(chain, policy, anonymousRoutes)` builds the binding, and `new JwtValidationModule(binding)` attaches it at `initialize()`. The filter runs in the `AUTHENTICATION` phase. On a verified token it records a `JwtPrincipal` — subject, tenant, session id, roles and scopes, all UUID-typed where the kernel's `PrincipalContext` asks for it — through `AdmissionContext`, together with the token's `sid` claim when present, and the route handler reads them from `RequestContext.current().principal()` and `RequestContext.current().sessionId()`. That is the only source of the caller's identity a route may use. On any failure the filter answers `401` with `WWW-Authenticate: Bearer` and a fixed `application/problem+json` body that names nothing about the token. A route listed as anonymous admits a request without a token; a token that is present is verified on every route. A module with no binding refuses to initialise.
 
 ## Configuration
 
@@ -41,7 +53,7 @@ No verification result is cached: every request verifies its token's signature. 
 | `exeris.caps.jwt.algorithms` | `EdDSA` | accepted algorithms, `EdDSA` and optionally `RS256` |
 | `exeris.caps.jwt.clock-skew-seconds` | `30` | skew on `exp`, `nbf`, `iat`; at most 300 |
 | `exeris.caps.jwt.tenant-claim` | `tid` | claim carrying the tenant id: one string, absent when the token has no tenant (token-issuer `TokenIssueRequest.TENANT_CLAIM`) |
-| `exeris.caps.jwt.jwks-timeout-millis` | `2000` | JWKS connect and response timeout |
+| `exeris.caps.jwt.jwks-timeout-millis` | `2000` | deadline for the whole JWKS fetch |
 | `exeris.caps.jwt.jwks-refresh-seconds` | `300` | JWKS age that triggers a reload |
 | `exeris.caps.jwt.jwks-min-refresh-seconds` | `30` | minimum spacing of reloads, including unknown-`kid` reloads |
 | `exeris.caps.jwt.anonymous-routes` | none | comma-separated `METHOD /path/{template}` routes that admit a request without a token |
