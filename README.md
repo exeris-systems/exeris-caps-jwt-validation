@@ -1,6 +1,6 @@
 # exeris-caps-jwt-validation
 
-JWT admission as an Exeris capability. It provides one service, `JwtAdmissionPolicy`, which validates a compact JWS — taken from an `Authorization` header or passed raw — and returns a `JwtValidationResult` with a status and, on success, the subject, issuer, tenant, expiry and issued-at claims. It owns no transport and fetches nothing over the network.
+JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, fetched by the capability itself from the configured `jwks-uri` within the bounds in [JWKS fetch](#jwks-fetch), and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It owns no inbound transport.
 
 Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API is not stable and no artefact has been published.
 
@@ -16,7 +16,18 @@ Behaviour worth knowing before composing it:
 
 - `JwtAdmissionPolicies` builds a policy for an HMAC-SHA256 secret, an Ed25519, RS256 or ES256 public key, or a JWKS document supplied as a string or a `Supplier<String>`.
 - A rejected token is a `JwtValidationStatus` value, not an exception.
-- A JWKS supplier is called by the policy; retrieving the document from an issuer is the caller's job.
+
+## JWKS fetch
+
+The capability fetches the issuer's JWKS itself; the verification decision reads no network. The fetch is bounded:
+
+- it goes only to the configured `exeris.caps.jwt.jwks-uri`, over HTTPS or, on a loopback host, HTTP, and follows no redirect;
+- one deadline covers the whole fetch, connecting, headers and body (`jwks-timeout-millis`);
+- the body is capped at 64 KiB, enforced while it streams;
+- a refresh is single-flight: concurrent requests share one fetch. Keys are reloaded when older than `jwks-refresh-seconds`, and an unknown `kid` triggers a reload at most once per `jwks-min-refresh-seconds`;
+- a failed fetch keeps the previous keys.
+
+Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `Supplier<String>`.
 
 ## Build & test
 

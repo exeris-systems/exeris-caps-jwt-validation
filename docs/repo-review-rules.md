@@ -110,8 +110,8 @@ S8. **The decision path is transport-free; the one outbound call is the issuer's
     - a refresh that is not single-flight, or has no minimum refetch interval → `[HARD BLOCK]`;
     - any other outbound call, a fetch from the verification decision path, an inbound HTTP server or
       listener, or an HTTP-client or file-fetch call in `api` → `[HARD BLOCK]`.
-    ADR-099 obligation 8 requires EdDSA verification against a JWKS document with the algorithm pinned
-    before the signature is checked; the fetch itself is this capability's own rule.
+    ADR-099 obligation 8 requires EdDSA verification against a JWKS document. The README states the
+    fetch and its bounds, and this rule judges code against that statement.
 
 S9. **A rejected token is a `JwtValidationStatus`, not an exception.** A path that throws for a
     malformed, expired or badly signed token, or that collapses two statuses into one →
