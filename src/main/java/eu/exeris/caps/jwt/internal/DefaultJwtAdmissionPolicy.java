@@ -10,8 +10,6 @@ import java.security.Signature;
 import java.time.Clock;
 import java.util.Base64;
 import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -90,23 +88,25 @@ public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy {
                 || token.indexOf('.', dot2 + 1) >= 0) {
             return malformed("Token is not a three-part compact JWS");
         }
-        Map<String, Object> header;
+        JwsHeaderScanner.Header header;
         byte[] signatureBytes;
         try {
-            header = Json.parseObject(decodeSegment(token, 0, dot1));
+            header = JwsHeaderScanner.scan(decodeSegment(token, 0, dot1));
             signatureBytes = Base64.getUrlDecoder().decode(token.substring(dot2 + 1));
         } catch (IllegalArgumentException e) {
             return malformed("Token header or signature is not valid Base64URL JSON");
         }
-        if (!(header.get("alg") instanceof String alg) || alg.isEmpty()) {
+        String alg = header.alg();
+        if (alg == null || alg.isEmpty()) {
             return malformed("Token header has no alg");
         }
-        if (header.containsKey("crit")) {
+        if (header.critical()) {
             return malformed("Token header lists critical extensions, none of which are supported");
         }
 
         // 2. kid.
-        if (!(header.get("kid") instanceof String kid) || kid.isEmpty()) {
+        String kid = header.kid();
+        if (kid == null || kid.isEmpty()) {
             return JwtValidationResult.failure(JwtValidationStatus.UNKNOWN_KEY, "Token header has no kid");
         }
 
@@ -129,98 +129,68 @@ public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy {
         }
 
         // 6. Claims, trusted only from here on.
-        Map<String, Object> claims;
+        JwtClaimsScanner.Claims claims;
         try {
-            claims = Json.parseObject(decodeSegment(token, dot1 + 1, dot2));
+            claims = JwtClaimsScanner.scan(decodeSegment(token, dot1 + 1, dot2), expectedAudience, tenantClaim);
         } catch (IllegalArgumentException e) {
             return malformed("Token claims are not a JSON object");
         }
         return checkClaims(claims);
     }
 
-    private JwtValidationResult checkClaims(Map<String, Object> claims) {
-        if (!expectedIssuer.equals(claims.get("iss"))) {
+    private JwtValidationResult checkClaims(JwtClaimsScanner.Claims claims) {
+        if (!expectedIssuer.equals(claims.issuer)) {
             return JwtValidationResult.failure(JwtValidationStatus.UNAUTHORIZED_ISSUER, "Token iss is not the expected issuer");
         }
-        if (!audienceMatches(claims.get("aud"))) {
+        if (!claims.audienceMatches) {
             return JwtValidationResult.failure(JwtValidationStatus.UNAUTHORIZED_AUDIENCE, "Token aud does not contain the expected audience");
         }
-        if (!(claims.get("exp") instanceof Long exp)) {
+        if (!claims.hasExp) {
             return JwtValidationResult.failure(JwtValidationStatus.MISSING_CLAIM, "Token has no integer exp");
         }
+        long exp = claims.exp;
         long now = clock.instant().getEpochSecond();
         if (now > exp + skewSeconds) {
             return JwtValidationResult.failure(JwtValidationStatus.EXPIRED, "Token has expired");
         }
-        if (!(claims.get("nbf") instanceof Long nbf)) {
+        if (!claims.hasNbf) {
             return JwtValidationResult.failure(JwtValidationStatus.MISSING_CLAIM, "Token has no integer nbf");
         }
-        if (nbf - skewSeconds > now) {
+        if (claims.nbf - skewSeconds > now) {
             return JwtValidationResult.failure(JwtValidationStatus.PREMATURE, "Token nbf is in the future");
         }
-        Object iat = claims.get("iat");
-        if (iat != null && (!(iat instanceof Long iatSeconds) || iatSeconds - skewSeconds > now)) {
+        if (claims.iatWrong || (claims.hasIat && claims.iat - skewSeconds > now)) {
             return JwtValidationResult.failure(JwtValidationStatus.PREMATURE, "Token iat is in the future or not an integer");
         }
-        if (!(claims.get("sub") instanceof String sub) || sub.isEmpty()) {
+        String sub = claims.subject;
+        if (sub == null || sub.isEmpty()) {
             return JwtValidationResult.failure(JwtValidationStatus.MISSING_CLAIM, "Token has no sub");
         }
-        Object tenant = claims.get(tenantClaim);
-        Object sid = claims.get("sid");
-        if ((tenant != null && !(tenant instanceof String)) || (sid != null && !(sid instanceof String))) {
+        if (claims.tenantWrong || claims.sessionIdWrong) {
             return malformed("Token tenant or sid claim is not a string");
         }
-        Set<String> roles = stringSet(claims.get("roles"));
         Set<String> scopes = scopes(claims);
-        if (roles == null || scopes == null) {
+        if (claims.rolesWrong || scopes == null) {
             return malformed("Token roles or scope claim has the wrong type");
         }
-        return JwtValidationResult.valid(sub, expectedIssuer, (String) tenant, (String) sid, roles, scopes, exp,
-                iat instanceof Long l ? l : 0L);
+        return JwtValidationResult.valid(sub, expectedIssuer, claims.tenant, claims.sessionId, claims.roles, scopes,
+                exp, claims.hasIat ? claims.iat : 0L);
     }
 
-    private boolean audienceMatches(Object aud) {
-        if (aud instanceof String s) {
-            return expectedAudience.equals(s);
-        }
-        if (aud instanceof List<?> list) {
-            return list.contains(expectedAudience);
-        }
-        return false;
-    }
-
-    private static Set<String> scopes(Map<String, Object> claims) {
-        Object scope = claims.get("scope");
-        if (scope instanceof String s) {
+    private static Set<String> scopes(JwtClaimsScanner.Claims claims) {
+        if (claims.scopeString != null) {
             Set<String> out = new LinkedHashSet<>();
-            for (String part : s.split(" ")) {
+            for (String part : claims.scopeString.split(" ")) {
                 if (!part.isEmpty()) {
                     out.add(part);
                 }
             }
             return out;
         }
-        if (scope != null) {
+        if (claims.scopeWrong) {
             return null;
         }
-        return stringSet(claims.get("scp"));
-    }
-
-    private static Set<String> stringSet(Object value) {
-        if (value == null) {
-            return Set.of();
-        }
-        if (!(value instanceof List<?> list)) {
-            return null;
-        }
-        Set<String> out = new LinkedHashSet<>();
-        for (Object item : list) {
-            if (!(item instanceof String s)) {
-                return null;
-            }
-            out.add(s);
-        }
-        return out;
+        return claims.scpWrong ? null : claims.scp;
     }
 
     private static boolean verifySignature(JwksKeySet.JwkKey key, byte[] signingInput, byte[] signature) {
@@ -242,9 +212,8 @@ public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy {
         }
     }
 
-    private static String decodeSegment(String token, int start, int end) {
-        byte[] bytes = Base64.getUrlDecoder().decode(token.substring(start, end));
-        return new String(bytes, StandardCharsets.UTF_8);
+    private static byte[] decodeSegment(String token, int start, int end) {
+        return Base64.getUrlDecoder().decode(token.substring(start, end));
     }
 
     private static boolean isCompactSerialization(String token) {

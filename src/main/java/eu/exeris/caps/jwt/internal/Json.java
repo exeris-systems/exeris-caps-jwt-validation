@@ -7,7 +7,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Strict JSON parser for JOSE headers, JWT claim sets and JWKS documents (RFC 8259).
+ * Strict JSON tree parser for the JWKS document (RFC 8259). The per-request path, the JOSE header and the
+ * claim set of a token, never uses it: it is read by {@link JwsHeaderScanner} and {@link JwtClaimsScanner},
+ * which build no tree.
  *
  * <p>Objects become {@link Map}, arrays {@link List}, strings {@link String}, integers {@link Long},
  * other numbers {@link Double}, and literals {@link Boolean} or {@code null}. A duplicate member name is

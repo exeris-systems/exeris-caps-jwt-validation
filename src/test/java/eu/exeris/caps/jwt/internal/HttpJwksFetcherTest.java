@@ -38,6 +38,29 @@ class HttpJwksFetcherTest {
             exchange.sendResponseHeaders(200, -1);
             exchange.close();
         });
+        server.createContext("/stalled-body", exchange -> {
+            exchange.sendResponseHeaders(200, 1_000);
+            try {
+                exchange.getResponseBody().write("{\"keys\":".getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+                Thread.sleep(3_000);
+            } catch (Exception e) {
+                // the client abandoned the exchange
+            }
+            exchange.close();
+        });
+        server.createContext("/oversized", exchange -> {
+            byte[] chunk = new byte[16 * 1024];
+            exchange.sendResponseHeaders(200, 0);
+            try {
+                for (int i = 0; i < 16; i++) {
+                    exchange.getResponseBody().write(chunk);
+                }
+            } catch (Exception e) {
+                // the client abandoned the exchange
+            }
+            exchange.close();
+        });
         server.createContext("/missing", exchange -> {
             exchange.sendResponseHeaders(404, -1);
             exchange.close();
@@ -66,6 +89,23 @@ class HttpJwksFetcherTest {
         long start = System.nanoTime();
         assertThatThrownBy(fetcher::get).isInstanceOf(RuntimeException.class);
         assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(1_500));
+    }
+
+    @Test
+    @DisplayName("gives up at the timeout when the body stalls after the headers")
+    void timesOutOnStalledBody() {
+        HttpJwksFetcher fetcher = new HttpJwksFetcher(uri("/stalled-body"), Duration.ofMillis(500));
+        long start = System.nanoTime();
+        assertThatThrownBy(fetcher::get).isInstanceOf(RuntimeException.class);
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(2_000));
+    }
+
+    @Test
+    @DisplayName("refuses a body over the size bound")
+    void refusesOversizedBody() {
+        assertThatThrownBy(new HttpJwksFetcher(uri("/oversized"), Duration.ofSeconds(5))::get)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("exceeds");
     }
 
     @Test
