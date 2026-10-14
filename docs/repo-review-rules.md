@@ -4,7 +4,7 @@ type: reference
 visibility: public
 owning-repo: exeris-caps-jwt-validation
 status: active
-last-verified: 2026-10-14
+last-verified: 2026-10-13
 ---
 
 # Review rules for `exeris-caps-jwt-validation`
@@ -110,8 +110,8 @@ S8. **The decision path is transport-free; the one outbound call is the issuer's
     - a refresh that is not single-flight, or has no minimum refetch interval → `[HARD BLOCK]`;
     - any other outbound call, a fetch from the verification decision path, an inbound HTTP server or
       listener, or an HTTP-client or file-fetch call in `api` → `[HARD BLOCK]`.
-    ADR-099 obligation 8 requires EdDSA verification against a JWKS document. The README states the
-    fetch and its bounds, and this rule judges code against that statement.
+    ADR-099 obligation 8 requires EdDSA verification against a JWKS document; it does not say who
+    retrieves the document, and this rule judges code against the bounds above.
 
 S9. **A rejected token is a `JwtValidationStatus`, not an exception.** A path that throws for a
     malformed, expired or badly signed token, or that collapses two statuses into one →
