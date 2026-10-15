@@ -76,7 +76,8 @@ public final class JwtAdmissionPolicies {
      * @param inProcessJwks JWKS source used when {@link #KEY_JWKS_URI} is absent, for an issuer in the same
      *                      process; may be null
      * @return the policy
-     * @throws IllegalStateException if the configuration names no key source or omits a required key
+     * @throws IllegalStateException if the configuration names no key source, omits a required key, or holds a
+     *         value outside its bounds, naming the property
      */
     public static JwtAdmissionPolicy fromProperties(Map<String, String> properties, Supplier<String> inProcessJwks) {
         Objects.requireNonNull(properties, "properties");
@@ -253,6 +254,10 @@ public final class JwtAdmissionPolicies {
             requireWithinBounds(jwksTimeout, KEY_JWKS_TIMEOUT_MILLIS, "milliseconds", 1);
             requireWithinBounds(jwksRefreshInterval, KEY_JWKS_REFRESH_SECONDS, "seconds", 1000);
             requireWithinBounds(jwksMinRefreshInterval, KEY_JWKS_MIN_REFRESH_SECONDS, "seconds", 1000);
+            if (jwksRefreshInterval.compareTo(jwksMinRefreshInterval) < 0) {
+                throw new IllegalStateException(KEY_JWKS_REFRESH_SECONDS + " must not be smaller than "
+                        + KEY_JWKS_MIN_REFRESH_SECONDS);
+            }
             if (acceptedAlgorithms.isEmpty() || !SUPPORTED_ALGORITHMS.containsAll(acceptedAlgorithms)) {
                 throw new IllegalStateException("Accepted algorithms must be a non-empty subset of " + SUPPORTED_ALGORITHMS);
             }
@@ -263,7 +268,12 @@ public final class JwtAdmissionPolicies {
             if (!fixedKeys.isEmpty()) {
                 keySet = JwksKeySet.fixed(fixedKeys);
             } else if (staticJwks != null) {
-                keySet = JwksKeySet.fixed(List.copyOf(JwksKeySet.parse(staticJwks).values()));
+                try {
+                    keySet = JwksKeySet.fixed(List.copyOf(JwksKeySet.parse(staticJwks).values()));
+                } catch (RuntimeException e) {
+                    throw new IllegalStateException("The static JWKS document passed to jwks(String) is not a valid JWKS: "
+                            + e.getMessage(), e);
+                }
             } else {
                 Supplier<String> source = jwksSupplier != null ? jwksSupplier : new HttpJwksFetcher(jwksUri, jwksTimeout);
                 keySet = JwksKeySet.fromSource(source, jwksRefreshInterval.toNanos(),

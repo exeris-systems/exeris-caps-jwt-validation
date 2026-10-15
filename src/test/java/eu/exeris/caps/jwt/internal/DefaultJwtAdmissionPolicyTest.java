@@ -414,6 +414,25 @@ class DefaultJwtAdmissionPolicyTest {
         }
 
         @Test
+        void aRefreshIntervalBelowTheMinimumNamesBothProperties() {
+            assertThatThrownBy(() -> JwtAdmissionPolicies.fromProperties(java.util.Map.of(
+                    JwtAdmissionPolicies.KEY_ISSUER, ISSUER,
+                    JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
+                    JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS, "10"), () -> JWKS))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_MIN_REFRESH_SECONDS);
+        }
+
+        @Test
+        void anUnparseableStaticJwksIsIllegalStateNamingTheSource() {
+            assertThatThrownBy(() -> JwtAdmissionPolicies.builder().jwks("not json")
+                    .expectedIssuer(ISSUER).expectedAudience(AUDIENCE).build())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("jwks(String)");
+        }
+
+        @Test
         void aJwksIntervalOutsideItsBoundsIsRejectedAsIllegalState() {
             for (String key : java.util.List.of(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS,
                     JwtAdmissionPolicies.KEY_JWKS_MIN_REFRESH_SECONDS, JwtAdmissionPolicies.KEY_JWKS_TIMEOUT_MILLIS)) {
