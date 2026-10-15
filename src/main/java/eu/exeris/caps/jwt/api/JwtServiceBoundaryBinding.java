@@ -12,8 +12,8 @@ import java.util.Set;
  * Binds a {@link JwtAdmissionPolicy} into {@code exeris-caps-service-boundary-core}'s
  * {@link RequestFilterChain}, in the {@code AUTHENTICATION} phase.
  *
- * <p>This type is the only one in the capability that names a Service Boundary type, so a composition
- * without {@code service-boundary-core} never loads it.
+ * <p>This type is the only public API type in the capability that names a Service Boundary type, so a
+ * composition without {@code service-boundary-core} never loads it.
  *
  * @since 0.1.0
  */

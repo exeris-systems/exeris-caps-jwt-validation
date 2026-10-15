@@ -13,13 +13,21 @@ public enum JwtValidationStatus {
     /** Authorization header or token is absent. */
     MISSING_TOKEN,
 
-    /** Token is not a compact JWS, a segment is not Base64URL, or the header or claims are not a JSON object. */
+    /**
+     * The input is structurally invalid: the {@code Authorization} scheme is not {@code Bearer}; the token is
+     * longer than 8192 characters, is not a three-part compact JWS, or has a character outside Base64URL and
+     * {@code '.'}; the header or claims are not a JSON object, or the header has no {@code alg} or lists
+     * {@code crit}; or the tenant, {@code sid}, {@code roles}, {@code scope} or {@code scp} claim has the wrong type.
+     */
     MALFORMED,
 
     /** Token has expired ({@code exp} is in the past beyond the permitted clock skew). */
     EXPIRED,
 
-    /** Token is not yet valid ({@code nbf}, or {@code iat}, is in the future beyond the permitted clock skew). */
+    /**
+     * Token is not yet valid: {@code nbf} or {@code iat} is in the future beyond the permitted clock skew, or
+     * {@code iat} is present and not an integer.
+     */
     PREMATURE,
 
     /** Cryptographic signature check failed (token was forged or tampered with). */

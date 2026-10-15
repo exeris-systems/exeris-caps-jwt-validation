@@ -24,8 +24,11 @@ import java.util.Set;
  *   <li>key: the issuer's key with that {@code kid}, from the JWKS;</li>
  *   <li>algorithm: the header's {@code alg} must equal the algorithm the key is bound to, and be accepted;</li>
  *   <li>signature, with the key and that algorithm only;</li>
- *   <li>the claims, read only now: {@code iss}, {@code aud}, {@code exp} and {@code nbf} (both required), and
- *       {@code iat} not in the future, each with the same bounded clock skew.</li>
+ *   <li>the claims, read only now and in this order: {@code iss}, {@code aud}, {@code exp} and {@code nbf}
+ *       (both required), {@code iat} an integer and not in the future, each time claim with the same bounded
+ *       clock skew; then a non-empty {@code sub} (else {@code MISSING_CLAIM}); then the tenant, {@code sid},
+ *       {@code roles}, {@code scope} and {@code scp} claims, each of which, when present, must have its
+ *       expected type (else {@code MALFORMED}).</li>
  * </ol>
  * The algorithm is never taken from the token on its own, so a token cannot choose how it is verified.
  * Nothing about a token is cached: every call verifies the signature.
