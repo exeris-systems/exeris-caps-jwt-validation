@@ -27,6 +27,8 @@ public final class JwtPrincipal implements PrincipalContext {
     private final long expiresAtEpochSecond;
 
     /**
+     * Creates the principal a validated token resolves to.
+     *
      * @param subject {@code sub}; non-null
      * @param tenant the tenant claim, or null
      * @param session {@code sid}, or null
@@ -106,6 +108,8 @@ public final class JwtPrincipal implements PrincipalContext {
     }
 
     /**
+     * Returns the issuer the token was minted by.
+     *
      * @return the token's issuer
      */
     public String issuer() {
@@ -113,6 +117,8 @@ public final class JwtPrincipal implements PrincipalContext {
     }
 
     /**
+     * Returns the instant the token stops being valid.
+     *
      * @return the token's {@code exp}, in epoch seconds
      */
     public long expiresAtEpochSecond() {

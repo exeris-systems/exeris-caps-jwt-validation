@@ -412,5 +412,20 @@ class DefaultJwtAdmissionPolicyTest {
                             + ",\"nbf\":" + (Instant.now().getEpochSecond() - 10) + "}"));
             assertThat(policy.validateToken(rs).status()).isEqualTo(JwtValidationStatus.VALID);
         }
+
+        @Test
+        void aJwksIntervalOutsideItsBoundsIsRejectedAsIllegalState() {
+            for (String key : java.util.List.of(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS,
+                    JwtAdmissionPolicies.KEY_JWKS_MIN_REFRESH_SECONDS, JwtAdmissionPolicies.KEY_JWKS_TIMEOUT_MILLIS)) {
+                for (String bad : java.util.List.of(String.valueOf(Long.MAX_VALUE), "0", "-5")) {
+                    assertThatThrownBy(() -> JwtAdmissionPolicies.fromProperties(java.util.Map.of(
+                            JwtAdmissionPolicies.KEY_ISSUER, ISSUER,
+                            JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
+                            key, bad), () -> JWKS))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining(key);
+                }
+            }
+        }
     }
 }

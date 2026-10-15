@@ -13,6 +13,8 @@ package eu.exeris.caps.jwt.api;
 public interface AdmissionHostBinding {
 
     /**
+     * Names the host this binding installs the check in.
+     *
      * @return the host's name, for diagnostics
      */
     String host();

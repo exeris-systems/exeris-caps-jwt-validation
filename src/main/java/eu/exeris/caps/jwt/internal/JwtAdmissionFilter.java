@@ -43,6 +43,8 @@ public final class JwtAdmissionFilter implements AdmissionFilter {
     private final Set<String> anonymousRoutes;
 
     /**
+     * Creates the filter that admits a request only when its token verifies under {@code policy}.
+     *
      * @param policy token verification policy
      * @param anonymousRoutes routes, as {@code "METHOD /path/{template}"}, that admit a request without a token
      */

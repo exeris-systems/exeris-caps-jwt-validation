@@ -4,7 +4,7 @@ package eu.exeris.caps.jwt.api;
  * Contract for edge JWT admission and token validation policy.
  *
  * <p>Participates in the Gateway policy pipeline to authenticate inbound requests
- * against cryptographic tokens with zero-allocation parsing and bounded signature caching.
+ * against cryptographic tokens. Every call verifies the signature; nothing about a token is cached.
  *
  * @since 0.1.0
  */

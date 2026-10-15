@@ -54,6 +54,7 @@ public final class JwtAdmissionPolicies {
     public static final String DEFAULT_TENANT_CLAIM = "tid";
 
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(5);
+    private static final Duration MAX_JWKS_INTERVAL = Duration.ofDays(1);
     private static final Set<String> SUPPORTED_ALGORITHMS = Set.of("EdDSA", "RS256");
 
     private JwtAdmissionPolicies() {
@@ -115,6 +116,13 @@ public final class JwtAdmissionPolicies {
             return Long.parseLong(value.strip());
         } catch (NumberFormatException e) {
             throw new IllegalStateException(key + " is not an integer", e);
+        }
+    }
+
+    private static void requireWithinBounds(Duration value, String key, String unit, long millisPerUnit) {
+        if (value.isNegative() || value.isZero() || value.compareTo(MAX_JWKS_INTERVAL) > 0) {
+            throw new IllegalStateException(key + " must be between 1 and "
+                    + MAX_JWKS_INTERVAL.toMillis() / millisPerUnit + " " + unit);
         }
     }
 
@@ -242,6 +250,9 @@ public final class JwtAdmissionPolicies {
             if (clockSkew.isNegative() || clockSkew.compareTo(MAX_CLOCK_SKEW) > 0) {
                 throw new IllegalStateException("Clock skew must be between 0 and " + MAX_CLOCK_SKEW.toSeconds() + " seconds");
             }
+            requireWithinBounds(jwksTimeout, KEY_JWKS_TIMEOUT_MILLIS, "milliseconds", 1);
+            requireWithinBounds(jwksRefreshInterval, KEY_JWKS_REFRESH_SECONDS, "seconds", 1000);
+            requireWithinBounds(jwksMinRefreshInterval, KEY_JWKS_MIN_REFRESH_SECONDS, "seconds", 1000);
             if (acceptedAlgorithms.isEmpty() || !SUPPORTED_ALGORITHMS.containsAll(acceptedAlgorithms)) {
                 throw new IllegalStateException("Accepted algorithms must be a non-empty subset of " + SUPPORTED_ALGORITHMS);
             }

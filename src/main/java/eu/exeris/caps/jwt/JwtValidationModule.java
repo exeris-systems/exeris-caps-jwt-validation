@@ -41,6 +41,8 @@ public final class JwtValidationModule implements CapabilityLifecycleHooks {
     }
 
     /**
+     * Creates a module that installs its check through {@code binding}.
+     *
      * @param binding where the token check is installed; null leaves the module unable to initialise
      */
     public JwtValidationModule(AdmissionHostBinding binding) {
