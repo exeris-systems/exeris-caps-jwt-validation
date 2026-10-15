@@ -93,11 +93,25 @@ S7. **Verification names what ran.** CI runs `mvn verify` on JDK 25 and 26 on ev
     `target/surefire-reports` at `<sha>`, and the reviewer accepts that as the evidence of what ran
     locally. A Verification that claims a pass without a command, report path or sha → `[STYLE]`.
 
-S8. **The capability validates; it owns no transport and fetches nothing.** `JwtAdmissionPolicy`
-    takes a compact JWS and returns a `JwtValidationResult`. A network, HTTP-client or file-fetch
-    call in `api` or `internal`, or a policy that retrieves a JWKS itself → `[HARD BLOCK]`: a JWKS
-    arrives as a string or a `Supplier<String>`, and retrieving it from an issuer is the caller's
-    job.
+S8. **The decision path is transport-free; the one outbound call is the issuer's JWKS.**
+    `JwtAdmissionPolicy` takes a compact JWS and returns a `JwtValidationResult`, and the verification
+    decision in `DefaultJwtAdmissionPolicy` reads no network or file: it works on
+    the keys `JwksKeySet` holds. The capability may fetch the issuer's JWKS itself, through
+    `HttpJwksFetcher` only, as an outbound HTTPS GET of the configured `jwks-uri` (HTTP only on a
+    loopback host, no redirects). The whole fetch is bounded by one deadline that covers connecting,
+    the headers and the body, and by a body size cap enforced while streaming. Refresh is
+    single-flight in `JwksKeySet`, under a refresh interval and a minimum refetch interval that also
+    limits reloads an unknown `kid` triggers, and a failed fetch keeps the previous keys. A JWKS may
+    equally arrive as a string or a `Supplier<String>`. The only inbound HTTP binding is the Service
+    Boundary admission filter (`JwtAdmissionFilter`, attached through `AdmissionHostBinding`).
+    Findings:
+    - a fetch with no deadline over the whole exchange, with no body size cap, over plain HTTP off
+      loopback, following redirects, or run outside `HttpJwksFetcher` → `[HARD BLOCK]`;
+    - a refresh that is not single-flight, or has no minimum refetch interval → `[HARD BLOCK]`;
+    - any other outbound call, a fetch from the verification decision path, an inbound HTTP server or
+      listener, or an HTTP-client or file-fetch call in `api` → `[HARD BLOCK]`.
+    ADR-099 obligation 8 requires EdDSA verification against a JWKS document; it does not say who
+    retrieves the document, and this rule judges code against the bounds above.
 
 S9. **A rejected token is a `JwtValidationStatus`, not an exception.** A path that throws for a
     malformed, expired or badly signed token, or that collapses two statuses into one →
