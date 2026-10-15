@@ -1,22 +1,62 @@
 # exeris-caps-jwt-validation
 
-JWT admission as an Exeris capability. It provides one service, `JwtAdmissionPolicy`, which validates a compact JWS — taken from an `Authorization` header or passed raw — and returns a `JwtValidationResult` with a status and, on success, the subject, issuer, tenant, expiry and issued-at claims. It owns no transport and fetches nothing over the network.
+JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, fetched by the capability itself from the configured `jwks-uri` within the bounds in [JWKS fetch](#jwks-fetch), and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It binds inbound only through the Service Boundary admission filter and owns no other inbound transport.
 
 Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API is not stable and no artefact has been published.
 
 ## Where it sits
 
 - **Layer:** Layer 3 — Gateway policy, in the Tier 2 capability map of [`high-level-architecture.md`](https://github.com/exeris-systems/exeris-docs/blob/main/high-level-architecture.md) §3.2.
-- **Depends on:** `exeris-kernel-spi` at `provided` scope, for the entitlement declaration only.
-- **Provides** (`@Provides`, all version 1.0.0): `JwtAdmissionPolicy`.
-- **Requires:** nothing.
+- **Depends on:** `exeris-kernel-spi`, `exeris-sdk-composition-lifecycle` and `exeris-caps-service-boundary-core`, all at `provided` scope, so the jar carries no runtime dependency.
+- **Provides** (`@Provides`): `JwtAdmissionPolicy` 0.1.0.
+- **Requires** (`@Requires`, optional): `RequestFilterChain` `[0.1.0,0.2.0)` from `exeris-caps-service-boundary-core`. ADR-099 obligation 4 also names the gateway's `policy-chain` as an optional host; no published capability provides it yet, so that binding does not exist.
 - **Wall (ADR-055):** `eu.exeris.caps.jwt.api` is the cross-cap surface; `eu.exeris.caps.jwt.internal` is private, and a sibling cap reaching into it fails the build. No Spring, servlet, Netty or reactive type may appear (ADR-006).
 
-Behaviour worth knowing before composing it:
+## Verification
 
-- `JwtAdmissionPolicies` builds a policy for an HMAC-SHA256 secret, an Ed25519, RS256 or ES256 public key, or a JWKS document supplied as a string or a `Supplier<String>`.
-- A rejected token is a `JwtValidationStatus` value, not an exception.
-- A JWKS supplier is called by the policy; retrieving the document from an issuer is the caller's job.
+`JwtAdmissionPolicy` checks a token in a fixed order, and each step runs only once the steps before it passed:
+
+1. parse — three Base64URL segments; the header a JSON object with `alg` and no `crit`; duplicate JSON members are refused;
+2. `kid` — required;
+3. key — the issuer's key with that `kid`, from its JWKS;
+4. algorithm — the header's `alg` must be the algorithm the key is bound to (Ed25519 → `EdDSA`, RSA ≥ 2048 bits → `RS256`) and an accepted one; `EdDSA` is accepted by default and `RS256` only when configured;
+5. signature;
+6. claims, read only after the signature — `iss`, `aud`, `exp` and `nbf` (both required), and `iat` not in the future, all with one clock skew of at most five minutes; `sub` is required.
+
+No verification result is cached: every request verifies its token's signature.
+
+## JWKS fetch
+
+The capability fetches the issuer's JWKS itself; the verification decision reads no network. The fetch is bounded:
+
+- it goes only to the configured `exeris.caps.jwt.jwks-uri`, over HTTPS or, on a loopback host, HTTP, and follows no redirect;
+- one deadline covers the whole fetch, connecting, headers and body (`jwks-timeout-millis`);
+- the body is capped at 64 KiB, enforced while it streams;
+- a refresh is single-flight: concurrent requests share one fetch. Keys are reloaded when older than `jwks-refresh-seconds`, and an unknown `kid` triggers a reload at most once per `jwks-min-refresh-seconds`;
+- a failed fetch keeps the previous keys.
+
+Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `Supplier<String>`.
+
+## Service Boundary filter
+
+`JwtServiceBoundaryBinding.of(chain, policy, anonymousRoutes)` builds the binding, and `new JwtValidationModule(binding)` attaches it at `initialize()`. The filter runs in the `AUTHENTICATION` phase. On a verified token it records a `JwtPrincipal` — subject, tenant, session id, roles and scopes, all UUID-typed where the kernel's `PrincipalContext` asks for it — through `AdmissionContext`, together with the token's `sid` claim when present, and the route handler reads them from `RequestContext.current().principal()` and `RequestContext.current().sessionId()`. That is the only source of the caller's identity a route may use. On any failure the filter answers `401` with `WWW-Authenticate: Bearer` and a fixed `application/problem+json` body that names nothing about the token. A route listed as anonymous admits a request without a token; a token that is present is verified on every route. A module with no binding refuses to initialise.
+
+## Configuration
+
+`JwtAdmissionPolicies.fromProperties(properties, inProcessJwks)` and `JwtServiceBoundaryBinding.anonymousRoutes(properties)` read:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `exeris.caps.jwt.issuer` | required | expected `iss` |
+| `exeris.caps.jwt.audience` | required | expected member of `aud` |
+| `exeris.caps.jwt.jwks-uri` | – | issuer JWKS; `https`, or `http` on loopback; without it the in-process JWKS supplier is used |
+| `exeris.caps.jwt.algorithms` | `EdDSA` | accepted algorithms, `EdDSA` and optionally `RS256` |
+| `exeris.caps.jwt.clock-skew-seconds` | `30` | skew on `exp`, `nbf`, `iat`; at most 300 |
+| `exeris.caps.jwt.tenant-claim` | `tid` | claim carrying the tenant id: one string, absent when the token has no tenant (token-issuer `TokenIssueRequest.TENANT_CLAIM`) |
+| `exeris.caps.jwt.jwks-timeout-millis` | `2000` | deadline for the whole JWKS fetch |
+| `exeris.caps.jwt.jwks-refresh-seconds` | `300` | JWKS age that triggers a reload |
+| `exeris.caps.jwt.jwks-min-refresh-seconds` | `30` | minimum spacing of reloads, including unknown-`kid` reloads |
+| `exeris.caps.jwt.anonymous-routes` | none | comma-separated `METHOD /path/{template}` routes that admit a request without a token |
 
 ## Build & test
 
@@ -29,7 +69,7 @@ mvn verify                               # pass 2 — generate cap-manifest.json
 
 Both passes are needed after a `clean`: `exeris:generate` runs before `compile`, and `compile` is when the processor writes the metadata it reads. `src/main/generated/java/cap-manifest.json` is committed, so a clean `git status` after `mvn verify` shows the manifest matches the declaration.
 
-`exeris-tooling` 0.10.0 and `exeris-sdk` 0.12.0 resolve from Maven Central, and `exeris-kernel` 0.13.0-SNAPSHOT is resolved from GitHub Packages, which needs a token with `read:packages`. [`.github/workflows/build.yml`](.github/workflows/build.yml) is the exact sequence, and [`.github/maven-settings.xml`](.github/maven-settings.xml) the repository configuration it uses.
+`exeris-tooling` 0.10.0 and `exeris-sdk` 0.12.0 resolve from Maven Central, `exeris-caps-service-boundary-core` is built from its `main` branch, and `exeris-kernel` 0.13.0-SNAPSHOT is resolved from GitHub Packages, which needs a token with `read:packages`. [`.github/workflows/build.yml`](.github/workflows/build.yml) is the exact sequence, and [`.github/maven-settings.xml`](.github/maven-settings.xml) the repository configuration it uses.
 
 ## Documentation
 

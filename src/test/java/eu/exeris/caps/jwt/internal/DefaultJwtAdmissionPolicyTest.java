@@ -4,193 +4,447 @@ import eu.exeris.caps.jwt.api.JwtAdmissionPolicies;
 import eu.exeris.caps.jwt.api.JwtAdmissionPolicy;
 import eu.exeris.caps.jwt.api.JwtValidationResult;
 import eu.exeris.caps.jwt.api.JwtValidationStatus;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.Base64;
 
+import static eu.exeris.caps.jwt.internal.TestTokens.AUDIENCE;
+import static eu.exeris.caps.jwt.internal.TestTokens.ISSUER;
+import static eu.exeris.caps.jwt.internal.TestTokens.NOW;
+import static eu.exeris.caps.jwt.internal.TestTokens.SUBJECT;
+import static eu.exeris.caps.jwt.internal.TestTokens.validClaims;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@DisplayName("DefaultJwtAdmissionPolicy Unit Tests")
+@DisplayName("DefaultJwtAdmissionPolicy")
 class DefaultJwtAdmissionPolicyTest {
 
-    private static final String SECRET = "exeris-gateway-edge-auth-secret-key-32b";
-    private static final Instant NOW = Instant.ofEpochSecond(1700000000L);
-    private static final Clock FIXED_CLOCK = Clock.fixed(NOW, ZoneId.of("UTC"));
+    private static final KeyPair ED = TestTokens.ed25519();
+    private static final KeyPair RSA = TestTokens.rsa(2048);
+    private static final String JWKS = TestTokens.jwks(TestTokens.okpJwk("ed-1", ED), TestTokens.rsaJwk("rsa-1", RSA));
 
-    private JwtAdmissionPolicy policy;
+    private static JwtAdmissionPolicies.Builder base() {
+        return JwtAdmissionPolicies.builder()
+                .jwks(JWKS)
+                .expectedIssuer(ISSUER)
+                .expectedAudience(AUDIENCE)
+                .clockSkew(Duration.ofSeconds(30))
+                .clock(Clock.fixed(Instant.ofEpochSecond(NOW), ZoneOffset.UTC));
+    }
 
-    @BeforeEach
-    void setUp() {
-        policy = JwtAdmissionPolicies.builder()
-                .secret(SECRET)
-                .expectedIssuer("https://auth.exeris.eu")
-                .expectedAudience("exeris-api")
-                .leeway(Duration.ofSeconds(10))
-                .clock(FIXED_CLOCK)
-                .build();
+    private static final JwtAdmissionPolicy POLICY = base().build();
+
+    private static JwtValidationStatus status(String token) {
+        return POLICY.validateToken(token).status();
+    }
+
+    /** Fills the placeholders, and adds an nbf in the past unless the test sets its own or names NO_NBF. */
+    private static String claims(String json) {
+        String filled = json.replace("ISS", ISSUER).replace("AUD", AUDIENCE).replace("SUB", SUBJECT);
+        if (filled.contains("NO_NBF")) {
+            return filled.replace(",\"NO_NBF\":0", "");
+        }
+        return filled.contains("\"nbf\"") ? filled : "{\"nbf\":" + (NOW - 10) + "," + filled.substring(1);
     }
 
     @Test
-    @DisplayName("Valid token in Authorization Bearer header passes validation")
-    void testValidToken() {
-        String token = JwtTestHelper.createToken(
-                SECRET,
-                "user-123",
-                "https://auth.exeris.eu",
-                "tenant-alpha",
-                "exeris-api",
-                1700003600L, // exp +1h
-                1699999000L, // nbf -1h
-                1699999000L  // iat -1h
-        );
+    @DisplayName("accepts an EdDSA token and returns its subject, tenant, session, roles and scopes")
+    void acceptsValidEdDsa() {
+        JwtValidationResult result = POLICY.validate("Bearer " + TestTokens.eddsa("ed-1", ED.getPrivate(), validClaims()));
 
-        JwtValidationResult result = policy.validate("Bearer " + token);
-
-        assertThat(result.isValid()).isTrue();
         assertThat(result.status()).isEqualTo(JwtValidationStatus.VALID);
-        assertThat(result.subject()).isEqualTo("user-123");
-        assertThat(result.issuer()).isEqualTo("https://auth.exeris.eu");
-        assertThat(result.tenantId()).isEqualTo("tenant-alpha");
-        assertThat(result.expiresAtSeconds()).isEqualTo(1700003600L);
+        assertThat(result.subject()).isEqualTo(SUBJECT);
+        assertThat(result.issuer()).isEqualTo(ISSUER);
+        assertThat(result.tenantId()).isEqualTo(TestTokens.TENANT);
+        assertThat(result.sessionId()).isEqualTo(TestTokens.SESSION);
+        assertThat(result.roles()).containsExactlyInAnyOrder("owner", "admin");
+        assertThat(result.scopes()).containsExactlyInAnyOrder("tenants:read", "tenants:write");
+        assertThat(result.expiresAtSeconds()).isEqualTo(NOW + 300);
     }
 
-    @Test
-    @DisplayName("Missing header returns MISSING_TOKEN")
-    void testMissingHeader() {
-        JwtValidationResult r1 = policy.validate(null);
-        assertThat(r1.status()).isEqualTo(JwtValidationStatus.MISSING_TOKEN);
+    @Nested
+    @DisplayName("parse")
+    class Parse {
 
-        JwtValidationResult r2 = policy.validate("");
-        assertThat(r2.status()).isEqualTo(JwtValidationStatus.MISSING_TOKEN);
+        @Test
+        void missingToken() {
+            assertThat(POLICY.validate(null).status()).isEqualTo(JwtValidationStatus.MISSING_TOKEN);
+            assertThat(POLICY.validate("").status()).isEqualTo(JwtValidationStatus.MISSING_TOKEN);
+        }
+
+        @Test
+        void notBearer() {
+            assertThat(POLICY.validate("Basic dXNlcjpwYXNz").status()).isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        void wrongSegmentCount() {
+            assertThat(status("aaa.bbb")).isEqualTo(JwtValidationStatus.MALFORMED);
+            assertThat(status("aaa.bbb.ccc.ddd")).isEqualTo(JwtValidationStatus.MALFORMED);
+            assertThat(status("aaa..ccc")).isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        void foreignCharacters() {
+            assertThat(status("a+a.b/b.c=c")).isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        void headerNotJson() {
+            assertThat(status(TestTokens.encode("not json") + "." + TestTokens.encode("{}") + ".AAAA"))
+                    .isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        void duplicateHeaderMember() {
+            String token = TestTokens.sign("{\"alg\":\"EdDSA\",\"kid\":\"ed-1\",\"alg\":\"RS256\"}", validClaims(),
+                    "Ed25519", ED.getPrivate());
+            assertThat(status(token)).isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        void missingAlg() {
+            String token = TestTokens.sign("{\"kid\":\"ed-1\"}", validClaims(), "Ed25519", ED.getPrivate());
+            assertThat(status(token)).isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        void criticalHeader() {
+            String token = TestTokens.sign("{\"alg\":\"EdDSA\",\"kid\":\"ed-1\",\"crit\":[\"exp\"]}", validClaims(),
+                    "Ed25519", ED.getPrivate());
+            assertThat(status(token)).isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        void tooLong() {
+            assertThat(status("a".repeat(DefaultJwtAdmissionPolicy.MAX_TOKEN_LENGTH + 1)))
+                    .isEqualTo(JwtValidationStatus.MALFORMED);
+        }
     }
 
-    @Test
-    @DisplayName("Non-Bearer scheme returns MALFORMED")
-    void testNonBearerScheme() {
-        JwtValidationResult r = policy.validate("Basic dXNlcjpwYXNz");
-        assertThat(r.status()).isEqualTo(JwtValidationStatus.MALFORMED);
+    @Nested
+    @DisplayName("kid and key")
+    class KidAndKey {
+
+        @Test
+        void missingKid() {
+            String token = TestTokens.sign("{\"alg\":\"EdDSA\"}", validClaims(), "Ed25519", ED.getPrivate());
+            assertThat(status(token)).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+        }
+
+        @Test
+        @DisplayName("an unknown kid refetches the JWKS, at most once per minimum refresh interval")
+        void unknownKidRefetches() {
+            KeyPair rotated = TestTokens.ed25519();
+            java.util.concurrent.atomic.AtomicReference<String> published =
+                    new java.util.concurrent.atomic.AtomicReference<>(TestTokens.jwks(TestTokens.okpJwk("ed-1", ED)));
+            java.util.concurrent.atomic.AtomicInteger fetches = new java.util.concurrent.atomic.AtomicInteger();
+            java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+            JwtAdmissionPolicy policy = JwtAdmissionPolicies.builder()
+                    .jwksSupplier(() -> {
+                        fetches.incrementAndGet();
+                        return published.get();
+                    })
+                    .expectedIssuer(ISSUER)
+                    .expectedAudience(AUDIENCE)
+                    .clock(Clock.fixed(Instant.ofEpochSecond(NOW), ZoneOffset.UTC))
+                    .nanoClock(nanos::get)
+                    .build();
+            String rotatedToken = TestTokens.eddsa("ed-2", rotated.getPrivate(), validClaims());
+
+            assertThat(policy.validateToken(rotatedToken).status()).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+            assertThat(fetches).hasValue(1);
+
+            published.set(TestTokens.jwks(TestTokens.okpJwk("ed-1", ED), TestTokens.okpJwk("ed-2", rotated)));
+            assertThat(policy.validateToken(rotatedToken).status()).as("within the minimum interval").isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+            assertThat(fetches).hasValue(1);
+
+            nanos.addAndGet(Duration.ofSeconds(30).toNanos());
+            assertThat(policy.validateToken(rotatedToken).status()).isEqualTo(JwtValidationStatus.VALID);
+            assertThat(fetches).hasValue(2);
+        }
+
+        @Test
+        void unknownKid() {
+            assertThat(status(TestTokens.eddsa("ed-unknown", ED.getPrivate(), validClaims())))
+                    .isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+        }
     }
 
-    @Test
-    @DisplayName("Expired token returns EXPIRED")
-    void testExpiredToken() {
-        String token = JwtTestHelper.createToken(
-                SECRET,
-                "user-expired",
-                "https://auth.exeris.eu",
-                "tenant-alpha",
-                "exeris-api",
-                1699990000L, // exp in past
-                1699980000L,
-                1699980000L
-        );
+    @Nested
+    @DisplayName("algorithm pinned to the key before the signature")
+    class AlgorithmConfusion {
 
-        JwtValidationResult result = policy.validate("Bearer " + token);
-        assertThat(result.isValid()).isFalse();
-        assertThat(result.status()).isEqualTo(JwtValidationStatus.EXPIRED);
+        @Test
+        @DisplayName("an EdDSA token presented under an RSA kid is refused")
+        void eddsaUnderRsaKid() {
+            String token = TestTokens.sign("{\"alg\":\"EdDSA\",\"kid\":\"rsa-1\"}", validClaims(), "Ed25519", ED.getPrivate());
+            assertThat(base().acceptRs256().build().validateToken(token).status())
+                    .isEqualTo(JwtValidationStatus.ALGORITHM_MISMATCH);
+        }
+
+        @Test
+        @DisplayName("an RS256 token presented under an Ed25519 kid is refused")
+        void rs256UnderEd25519Kid() {
+            String token = TestTokens.sign("{\"alg\":\"RS256\",\"kid\":\"ed-1\"}", validClaims(), "SHA256withRSA", RSA.getPrivate());
+            assertThat(base().acceptRs256().build().validateToken(token).status())
+                    .isEqualTo(JwtValidationStatus.ALGORITHM_MISMATCH);
+        }
+
+        @Test
+        @DisplayName("HS256 keyed with the RSA public key, under the RSA kid, is refused")
+        void hmacWithPublicKeyAsSecret() throws Exception {
+            String header = TestTokens.encode("{\"alg\":\"HS256\",\"kid\":\"rsa-1\"}");
+            String payload = TestTokens.encode(validClaims());
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(RSA.getPublic().getEncoded(), "HmacSHA256"));
+            byte[] sig = mac.doFinal((header + "." + payload).getBytes(StandardCharsets.US_ASCII));
+            String token = header + "." + payload + "." + Base64.getUrlEncoder().withoutPadding().encodeToString(sig);
+            assertThat(base().acceptRs256().build().validateToken(token).status())
+                    .isEqualTo(JwtValidationStatus.ALGORITHM_MISMATCH);
+        }
+
+        @Test
+        @DisplayName("alg none is refused")
+        void algNone() {
+            String token = TestTokens.unsigned("{\"alg\":\"none\",\"kid\":\"ed-1\"}", validClaims(), new byte[]{1});
+            assertThat(status(token)).isEqualTo(JwtValidationStatus.ALGORITHM_MISMATCH);
+        }
+
+        @Test
+        @DisplayName("RS256 is refused unless configured, even with a valid signature")
+        void rs256NotAccepted() {
+            String token = TestTokens.rs256("rsa-1", RSA.getPrivate(), validClaims());
+            assertThat(status(token)).isEqualTo(JwtValidationStatus.ALGORITHM_MISMATCH);
+            assertThat(base().acceptRs256().build().validateToken(token).status()).isEqualTo(JwtValidationStatus.VALID);
+        }
     }
 
-    @Test
-    @DisplayName("Future nbf returns PREMATURE")
-    void testPrematureToken() {
-        String token = JwtTestHelper.createToken(
-                SECRET,
-                "user-future",
-                "https://auth.exeris.eu",
-                "tenant-alpha",
-                "exeris-api",
-                1700005000L,
-                1700002000L, // nbf in future (NOW + 2000s)
-                1700000000L
-        );
+    @Nested
+    @DisplayName("signature")
+    class SignatureChecks {
 
-        JwtValidationResult result = policy.validate("Bearer " + token);
-        assertThat(result.isValid()).isFalse();
-        assertThat(result.status()).isEqualTo(JwtValidationStatus.PREMATURE);
+        @Test
+        void wrongKey() {
+            KeyPair other = TestTokens.ed25519();
+            assertThat(status(TestTokens.eddsa("ed-1", other.getPrivate(), validClaims())))
+                    .isEqualTo(JwtValidationStatus.INVALID_SIGNATURE);
+        }
+
+        @Test
+        @DisplayName("a tampered payload fails even after the original token was accepted")
+        void tamperedAfterAcceptance() {
+            String token = TestTokens.eddsa("ed-1", ED.getPrivate(), validClaims());
+            assertThat(status(token)).isEqualTo(JwtValidationStatus.VALID);
+
+            String[] parts = token.split("\\.");
+            String forged = parts[0] + "." + TestTokens.encode(validClaims().replace("owner", "root!")) + "." + parts[2];
+            assertThat(status(forged)).isEqualTo(JwtValidationStatus.INVALID_SIGNATURE);
+        }
+
+        @Test
+        @DisplayName("claims are not read before the signature: an expired forgery reports the signature")
+        void signatureBeforeClaims() {
+            KeyPair other = TestTokens.ed25519();
+            String expired = claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":1}");
+            assertThat(status(TestTokens.eddsa("ed-1", other.getPrivate(), expired)))
+                    .isEqualTo(JwtValidationStatus.INVALID_SIGNATURE);
+        }
     }
 
-    @Test
-    @DisplayName("Forged signature returns INVALID_SIGNATURE")
-    void testForgedSignature() {
-        String token = JwtTestHelper.createToken(
-                "other-secret-key-that-does-not-match",
-                "attacker",
-                "https://auth.exeris.eu",
-                "tenant-alpha",
-                "exeris-api",
-                1700005000L,
-                1699990000L,
-                1699990000L
-        );
+    @Nested
+    @DisplayName("claims")
+    class Claims {
 
-        JwtValidationResult result = policy.validate("Bearer " + token);
-        assertThat(result.isValid()).isFalse();
-        assertThat(result.status()).isEqualTo(JwtValidationStatus.INVALID_SIGNATURE);
+        private JwtValidationStatus signed(String json) {
+            return status(TestTokens.eddsa("ed-1", ED.getPrivate(), claims(json)));
+        }
+
+        @Test
+        void wrongIssuer() {
+            assertThat(signed("{\"iss\":\"https://evil.test\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + "}"))
+                    .isEqualTo(JwtValidationStatus.UNAUTHORIZED_ISSUER);
+        }
+
+        @Test
+        void wrongAudience() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"other\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + "}"))
+                    .isEqualTo(JwtValidationStatus.UNAUTHORIZED_AUDIENCE);
+            assertThat(signed("{\"iss\":\"ISS\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + "}"))
+                    .isEqualTo(JwtValidationStatus.UNAUTHORIZED_AUDIENCE);
+        }
+
+        @Test
+        void audienceArray() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":[\"other\",\"AUD\"],\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + "}"))
+                    .isEqualTo(JwtValidationStatus.VALID);
+        }
+
+        @Test
+        @DisplayName("a token without exp is refused")
+        void missingExp() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\"}"))
+                    .isEqualTo(JwtValidationStatus.MISSING_CLAIM);
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":\"" + (NOW + 60) + "\"}"))
+                    .isEqualTo(JwtValidationStatus.MISSING_CLAIM);
+        }
+
+        @Test
+        void expiredBeyondSkew() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW - 31) + "}"))
+                    .isEqualTo(JwtValidationStatus.EXPIRED);
+        }
+
+        @Test
+        void expiredWithinSkew() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW - 30) + "}"))
+                    .isEqualTo(JwtValidationStatus.VALID);
+        }
+
+        @Test
+        void notBeforeInFuture() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 600) + ",\"nbf\":" + (NOW + 31) + "}"))
+                    .isEqualTo(JwtValidationStatus.PREMATURE);
+        }
+
+        @Test
+        @DisplayName("a token without nbf is refused")
+        void missingNbf() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"NO_NBF\":0}"))
+                    .isEqualTo(JwtValidationStatus.MISSING_CLAIM);
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"nbf\":\"" + NOW + "\"}"))
+                    .isEqualTo(JwtValidationStatus.MISSING_CLAIM);
+        }
+
+        @Test
+        void issuedInFuture() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 600) + ",\"iat\":" + (NOW + 31) + "}"))
+                    .isEqualTo(JwtValidationStatus.PREMATURE);
+        }
+
+        @Test
+        void missingSubject() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"exp\":" + (NOW + 60) + "}"))
+                    .isEqualTo(JwtValidationStatus.MISSING_CLAIM);
+        }
+
+        @Test
+        void rolesOfWrongType() {
+            assertThat(signed("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"roles\":\"admin\"}"))
+                    .isEqualTo(JwtValidationStatus.MALFORMED);
+        }
+
+        @Test
+        @DisplayName("the tenant is read from tid by default, and the claim name is configurable")
+        void configurableTenantClaim() {
+            String token = TestTokens.eddsa("ed-1", ED.getPrivate(),
+                    claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"tid\":\"t-1\",\"tenant_id\":\"t-2\"}"));
+            assertThat(POLICY.validateToken(token).tenantId()).isEqualTo("t-1");
+            assertThat(base().tenantClaim("tenant_id").build().validateToken(token).tenantId()).isEqualTo("t-2");
+
+            String legacy = TestTokens.eddsa("ed-1", ED.getPrivate(),
+                    claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (NOW + 60) + ",\"tenant_id\":\"t-2\"}"));
+            assertThat(POLICY.validateToken(legacy).tenantId()).as("no tenant_id fallback").isNull();
+        }
     }
 
-    @Test
-    @DisplayName("Unexpected issuer returns UNAUTHORIZED_ISSUER")
-    void testUnexpectedIssuer() {
-        String token = JwtTestHelper.createToken(
-                SECRET,
-                "user-1",
-                "https://rogue-idp.com",
-                "tenant-alpha",
-                "exeris-api",
-                1700005000L,
-                1699990000L,
-                1699990000L
-        );
+    @Nested
+    @DisplayName("configuration")
+    class Configuration {
 
-        JwtValidationResult result = policy.validate("Bearer " + token);
-        assertThat(result.isValid()).isFalse();
-        assertThat(result.status()).isEqualTo(JwtValidationStatus.UNAUTHORIZED_ISSUER);
-    }
+        @Test
+        void requiresIssuerAndAudience() {
+            assertThatThrownBy(() -> JwtAdmissionPolicies.builder().jwks(JWKS).expectedAudience(AUDIENCE).build())
+                    .isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> JwtAdmissionPolicies.builder().jwks(JWKS).expectedIssuer(ISSUER).build())
+                    .isInstanceOf(IllegalStateException.class);
+        }
 
-    @Test
-    @DisplayName("Unexpected audience returns UNAUTHORIZED_AUDIENCE")
-    void testUnexpectedAudience() {
-        String token = JwtTestHelper.createToken(
-                SECRET,
-                "user-1",
-                "https://auth.exeris.eu",
-                "tenant-alpha",
-                "other-api",
-                1700005000L,
-                1699990000L,
-                1699990000L
-        );
+        @Test
+        void boundsClockSkew() {
+            assertThatThrownBy(() -> base().clockSkew(Duration.ofMinutes(6)).build())
+                    .isInstanceOf(IllegalStateException.class);
+        }
 
-        JwtValidationResult result = policy.validate("Bearer " + token);
-        assertThat(result.isValid()).isFalse();
-        assertThat(result.status()).isEqualTo(JwtValidationStatus.UNAUTHORIZED_AUDIENCE);
-    }
+        @Test
+        void requiresExactlyOneKeySource() {
+            assertThatThrownBy(() -> base().publicKey("k", ED.getPublic()).build())
+                    .isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> JwtAdmissionPolicies.builder().expectedIssuer(ISSUER).expectedAudience(AUDIENCE).build())
+                    .isInstanceOf(IllegalStateException.class);
+        }
 
-    @Test
-    @DisplayName("Repeated validation hits lock-free signature cache")
-    void testCacheHit() {
-        String token = JwtTestHelper.createToken(
-                SECRET,
-                "user-cached",
-                "https://auth.exeris.eu",
-                "tenant-1",
-                "exeris-api",
-                1700005000L,
-                1699990000L,
-                1699990000L
-        );
+        @Test
+        void refusesUnsupportedAlgorithms() {
+            assertThatThrownBy(() -> base().acceptedAlgorithms(java.util.Set.of("HS256")).build())
+                    .isInstanceOf(IllegalStateException.class);
+        }
 
-        JwtValidationResult first = policy.validate("Bearer " + token);
-        assertThat(first.isValid()).isTrue();
+        @Test
+        void fixedPublicKey() {
+            JwtAdmissionPolicy policy = JwtAdmissionPolicies.builder()
+                    .publicKey("ed-1", ED.getPublic())
+                    .expectedIssuer(ISSUER)
+                    .expectedAudience(AUDIENCE)
+                    .clock(Clock.fixed(Instant.ofEpochSecond(NOW), ZoneOffset.UTC))
+                    .build();
+            assertThat(policy.validateToken(TestTokens.eddsa("ed-1", ED.getPrivate(), validClaims())).isValid()).isTrue();
+        }
 
-        // Second lookup should return cached result
-        JwtValidationResult second = policy.validate("Bearer " + token);
-        assertThat(second.isValid()).isTrue();
-        assertThat(second.subject()).isEqualTo("user-cached");
+        @Test
+        void fromProperties() {
+            JwtAdmissionPolicy policy = JwtAdmissionPolicies.fromProperties(java.util.Map.of(
+                    JwtAdmissionPolicies.KEY_ISSUER, ISSUER,
+                    JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
+                    JwtAdmissionPolicies.KEY_ALGORITHMS, "EdDSA, RS256"), () -> JWKS);
+            String rs = TestTokens.rs256("rsa-1", RSA.getPrivate(),
+                    claims("{\"iss\":\"ISS\",\"aud\":\"AUD\",\"sub\":\"SUB\",\"exp\":" + (Instant.now().getEpochSecond() + 60)
+                            + ",\"nbf\":" + (Instant.now().getEpochSecond() - 10) + "}"));
+            assertThat(policy.validateToken(rs).status()).isEqualTo(JwtValidationStatus.VALID);
+        }
+
+        @Test
+        void aRefreshIntervalBelowTheMinimumNamesBothProperties() {
+            assertThatThrownBy(() -> JwtAdmissionPolicies.fromProperties(java.util.Map.of(
+                    JwtAdmissionPolicies.KEY_ISSUER, ISSUER,
+                    JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
+                    JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS, "10"), () -> JWKS))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_MIN_REFRESH_SECONDS);
+        }
+
+        @Test
+        void anUnparseableStaticJwksIsIllegalStateNamingTheSource() {
+            assertThatThrownBy(() -> JwtAdmissionPolicies.builder().jwks("not json")
+                    .expectedIssuer(ISSUER).expectedAudience(AUDIENCE).build())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("jwks(String)");
+        }
+
+        @Test
+        void aJwksIntervalOutsideItsBoundsIsRejectedAsIllegalState() {
+            for (String key : java.util.List.of(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS,
+                    JwtAdmissionPolicies.KEY_JWKS_MIN_REFRESH_SECONDS, JwtAdmissionPolicies.KEY_JWKS_TIMEOUT_MILLIS)) {
+                for (String bad : java.util.List.of(String.valueOf(Long.MAX_VALUE), "0", "-5")) {
+                    assertThatThrownBy(() -> JwtAdmissionPolicies.fromProperties(java.util.Map.of(
+                            JwtAdmissionPolicies.KEY_ISSUER, ISSUER,
+                            JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
+                            key, bad), () -> JWKS))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining(key);
+                }
+            }
+        }
     }
 }

@@ -5,347 +5,233 @@ import eu.exeris.caps.jwt.api.JwtValidationResult;
 import eu.exeris.caps.jwt.api.JwtValidationStatus;
 
 import java.nio.charset.StandardCharsets;
-import java.security.PublicKey;
+import java.security.GeneralSecurityException;
 import java.security.Signature;
 import java.time.Clock;
-import java.time.Duration;
-import java.util.function.Function;
+import java.util.Base64;
+import java.util.LinkedHashSet;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
 /**
- * High-performance, zero-allocation default implementation of {@link JwtAdmissionPolicy}.
+ * Default {@link JwtAdmissionPolicy}: verifies a compact JWS against the issuer's published keys.
  *
- * <p>Supports both HMAC-SHA256 (HS256) and Ed25519 (EdDSA) verification against
- * JWKS documents, with strict algorithm pinning and verification prior to signature parsing (ADR-099).
+ * <p>The checks run in a fixed order, and each one runs only after every check before it passed:
+ * <ol>
+ *   <li>parse: three Base64URL segments, the header a JSON object with an {@code alg} and no {@code crit};</li>
+ *   <li>{@code kid}: present in the header;</li>
+ *   <li>key: the issuer's key with that {@code kid}, from the JWKS;</li>
+ *   <li>algorithm: the header's {@code alg} must equal the algorithm the key is bound to, and be accepted;</li>
+ *   <li>signature, with the key and that algorithm only;</li>
+ *   <li>the claims, read only now and in this order: {@code iss}, {@code aud}, {@code exp} and {@code nbf}
+ *       (both required), {@code iat} an integer and not in the future, each time claim with the same bounded
+ *       clock skew; then a non-empty {@code sub} (else {@code MISSING_CLAIM}); then the tenant, {@code sid},
+ *       {@code roles}, {@code scope} and {@code scp} claims, each of which, when present, must have its
+ *       expected type (else {@code MALFORMED}).</li>
+ * </ol>
+ * The algorithm is never taken from the token on its own, so a token cannot choose how it is verified.
+ * Nothing about a token is cached: every call verifies the signature.
  *
  * @since 0.1.0
  */
 public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy {
 
-    private final HmacSha256Validator hmacValidator;
-    private final Function<String, PublicKey> keyResolver;
-    private final String pinnedAlgorithm;
+    /** Upper bound on a compact token's length; anything longer is refused before decoding. */
+    public static final int MAX_TOKEN_LENGTH = 8192;
+
+    private final JwksKeySet keySet;
+    private final Set<String> acceptedAlgorithms;
     private final String expectedIssuer;
     private final String expectedAudience;
-    private final long leewaySeconds;
-    private final LockFreeJwtCache cache;
+    private final long skewSeconds;
+    private final String tenantClaim;
     private final Clock clock;
 
-    public DefaultJwtAdmissionPolicy(
-            byte[] secretBytes,
-            String expectedIssuer,
-            String expectedAudience,
-            Duration leeway,
-            int cacheCapacity,
-            Clock clock
-    ) {
-        this(secretBytes, null, "HS256", expectedIssuer, expectedAudience, leeway, cacheCapacity, clock);
-    }
-
-    public DefaultJwtAdmissionPolicy(
-            byte[] secretBytes,
-            Function<String, PublicKey> keyResolver,
-            String pinnedAlgorithm,
-            String expectedIssuer,
-            String expectedAudience,
-            Duration leeway,
-            int cacheCapacity,
-            Clock clock
-    ) {
-        this.hmacValidator = (secretBytes != null && secretBytes.length > 0) ? new HmacSha256Validator(secretBytes) : null;
-        this.keyResolver = keyResolver;
-        this.pinnedAlgorithm = pinnedAlgorithm;
-        this.expectedIssuer = (expectedIssuer != null && !expectedIssuer.isBlank()) ? expectedIssuer : null;
-        this.expectedAudience = (expectedAudience != null && !expectedAudience.isBlank()) ? expectedAudience : null;
-        this.leewaySeconds = leeway != null ? Math.max(0, leeway.toSeconds()) : 0L;
-        this.cache = cacheCapacity > 0 ? new LockFreeJwtCache(cacheCapacity) : null;
-        this.clock = clock != null ? clock : Clock.systemUTC();
+    public DefaultJwtAdmissionPolicy(JwksKeySet keySet, Set<String> acceptedAlgorithms, String expectedIssuer,
+                                     String expectedAudience, long skewSeconds, String tenantClaim, Clock clock) {
+        this.keySet = Objects.requireNonNull(keySet, "keySet");
+        this.acceptedAlgorithms = Set.copyOf(acceptedAlgorithms);
+        this.expectedIssuer = Objects.requireNonNull(expectedIssuer, "expectedIssuer");
+        this.expectedAudience = Objects.requireNonNull(expectedAudience, "expectedAudience");
+        this.skewSeconds = skewSeconds;
+        this.tenantClaim = Objects.requireNonNull(tenantClaim, "tenantClaim");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public JwtValidationResult validate(CharSequence authorizationHeader) {
-        if (authorizationHeader == null || authorizationHeader.length() == 0) {
+        if (authorizationHeader == null || authorizationHeader.isEmpty()) {
             return JwtValidationResult.failure(JwtValidationStatus.MISSING_TOKEN, "Missing Authorization header");
         }
-
-        int tokenStart = skipBearerPrefix(authorizationHeader);
-        if (tokenStart < 0) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Invalid authorization scheme (expected Bearer)");
+        String header = authorizationHeader.toString();
+        if (header.length() < 8 || !header.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Authorization scheme is not Bearer");
         }
-
-        return validateTokenSlice(authorizationHeader, tokenStart, authorizationHeader.length());
+        return validateToken(header.substring(7).strip());
     }
 
     @Override
     public JwtValidationResult validateToken(CharSequence rawToken) {
-        if (rawToken == null || rawToken.length() == 0) {
+        if (rawToken == null || rawToken.isEmpty()) {
             return JwtValidationResult.failure(JwtValidationStatus.MISSING_TOKEN, "Token is empty");
         }
-        return validateTokenSlice(rawToken, 0, rawToken.length());
-    }
-
-    private JwtValidationResult validateTokenSlice(CharSequence token, int start, int end) {
-        int dot1 = indexOf(token, '.', start, end);
-        if (dot1 < 0) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: missing first dot");
+        if (rawToken.length() > MAX_TOKEN_LENGTH) {
+            return malformed("Token exceeds " + MAX_TOKEN_LENGTH + " characters");
         }
-        int dot2 = indexOf(token, '.', dot1 + 1, end);
-        if (dot2 < 0) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: missing second dot");
-        }
-        if (indexOf(token, '.', dot2 + 1, end) >= 0) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: contains more than two dots");
+        String token = rawToken.toString();
+        if (!isCompactSerialization(token)) {
+            return malformed("Token contains characters outside Base64URL and '.'");
         }
 
-        // 1. Decode header and extract algorithm & kid
-        byte[] headerBytes = Base64UrlDecoder.decodeToBytes(token, start, dot1);
-        if (headerBytes == null) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: header is not valid Base64URL");
+        // 1. Parse: exactly three non-empty segments, header is a JSON object.
+        int dot1 = token.indexOf('.');
+        int dot2 = dot1 < 0 ? -1 : token.indexOf('.', dot1 + 1);
+        if (dot1 <= 0 || dot2 < 0 || dot2 == dot1 + 1 || dot2 == token.length() - 1
+                || token.indexOf('.', dot2 + 1) >= 0) {
+            return malformed("Token is not a three-part compact JWS");
         }
-
-        JsonHeaderScanner.ParsedHeader header = JsonHeaderScanner.scan(headerBytes);
-        if (header == null || header.alg() == null || header.alg().isBlank()) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: missing algorithm header");
+        JwsHeaderScanner.Header header;
+        byte[] signatureBytes;
+        try {
+            header = JwsHeaderScanner.scan(decodeSegment(token, 0, dot1));
+            signatureBytes = Base64.getUrlDecoder().decode(token.substring(dot2 + 1));
+        } catch (IllegalArgumentException e) {
+            return malformed("Token header or signature is not valid Base64URL JSON");
         }
-
         String alg = header.alg();
-        if ("none".equalsIgnoreCase(alg)) {
-            return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "Algorithm 'none' is rejected");
+        if (alg == null || alg.isEmpty()) {
+            return malformed("Token header has no alg");
+        }
+        if (header.critical()) {
+            return malformed("Token header lists critical extensions, none of which are supported");
         }
 
-        // 2. Strict algorithm pinning enforcement (ADR-099 Zobowiązanie 8)
-        if (pinnedAlgorithm != null && !pinnedAlgorithm.equalsIgnoreCase(alg)) {
-            return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE,
-                    "Algorithm mismatch: pinned to '" + pinnedAlgorithm + "' but token specified '" + alg + "'");
+        // 2. kid.
+        String kid = header.kid();
+        if (kid == null || kid.isEmpty()) {
+            return JwtValidationResult.failure(JwtValidationStatus.UNKNOWN_KEY, "Token header has no kid");
         }
 
-        long nowSeconds = clock.instant().getEpochSecond();
+        // 3. Key, from the issuer's JWKS.
+        Optional<JwksKeySet.JwkKey> found = keySet.find(kid);
+        if (found.isEmpty()) {
+            return JwtValidationResult.failure(JwtValidationStatus.UNKNOWN_KEY, "No published key matches the token's kid");
+        }
+        JwksKeySet.JwkKey key = found.get();
 
-        // 3. Check lock-free signature cache (keyed on entire token to prevent payload tampering)
-        long tokenHash = 0L;
-        if (cache != null) {
-            tokenHash = ZeroAllocHasher.hashSubSequence(token, start, end);
-            JwtValidationResult cached = cache.get(tokenHash, nowSeconds);
-            if (cached != null) {
-                return cached;
-            }
+        // 4. Algorithm pinned to the key, before any signature work.
+        if (!key.algorithm().equals(alg) || !acceptedAlgorithms.contains(key.algorithm())) {
+            return JwtValidationResult.failure(JwtValidationStatus.ALGORITHM_MISMATCH,
+                    "Token alg is not the algorithm its key is bound to, or is not accepted");
         }
 
-        // 4. Decode payload
-        byte[] payloadBytes = Base64UrlDecoder.decodeToBytes(token, dot1 + 1, dot2);
-        if (payloadBytes == null) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: payload is not valid Base64URL");
+        // 5. Signature.
+        if (!verifySignature(key, token.substring(0, dot2).getBytes(StandardCharsets.US_ASCII), signatureBytes)) {
+            return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "Signature verification failed");
         }
 
-        // Scan standard claims
-        JsonClaimsScanner.ParsedClaims claims = JsonClaimsScanner.scan(payloadBytes);
-        if (claims == null) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: payload is not valid JSON");
+        // 6. Claims, trusted only from here on.
+        JwtClaimsScanner.Claims claims;
+        try {
+            claims = JwtClaimsScanner.scan(decodeSegment(token, dot1 + 1, dot2), expectedAudience, tenantClaim);
+        } catch (IllegalArgumentException e) {
+            return malformed("Token claims are not a JSON object");
         }
-
-        // Fast-path claims checks before expensive crypto
-        if (claims.expiresAt() > 0 && claims.expiresAt() + leewaySeconds < nowSeconds) {
-            return JwtValidationResult.failure(JwtValidationStatus.EXPIRED, "Token expired at epoch " + claims.expiresAt());
-        }
-
-        if (claims.notBefore() > 0 && claims.notBefore() - leewaySeconds > nowSeconds) {
-            return JwtValidationResult.failure(JwtValidationStatus.PREMATURE, "Token not valid before epoch " + claims.notBefore());
-        }
-
-        if (expectedIssuer != null && !expectedIssuer.equals(claims.issuer())) {
-            return JwtValidationResult.failure(JwtValidationStatus.UNAUTHORIZED_ISSUER,
-                    "Expected issuer '" + expectedIssuer + "' but got '" + claims.issuer() + "'");
-        }
-
-        if (expectedAudience != null && !expectedAudience.equals(claims.audience())) {
-            return JwtValidationResult.failure(JwtValidationStatus.UNAUTHORIZED_AUDIENCE,
-                    "Expected audience '" + expectedAudience + "' but got '" + claims.audience() + "'");
-        }
-
-        // 5. Decode signature bytes
-        byte[] signatureBytes = Base64UrlDecoder.decodeToBytes(token, dot2 + 1, end);
-        if (signatureBytes == null) {
-            return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, "Malformed JWT: signature is not valid Base64URL");
-        }
-
-        // 6. Cryptographic signature verification based on algorithm
-        if ("EdDSA".equalsIgnoreCase(alg)) {
-            if (keyResolver == null) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "EdDSA algorithm not configured on policy");
-            }
-            if (header.kid() == null || header.kid().isBlank()) {
-                if (keyResolver.apply(null) == null) {
-                    return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "kid header missing for asymmetric token");
-                }
-            }
-            PublicKey publicKey = keyResolver.apply(header.kid());
-            if (publicKey == null) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE,
-                        "Unknown or unresolvable key id: " + (header.kid() != null ? header.kid() : "<unspecified>"));
-            }
-            if (signatureBytes.length != 64) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE,
-                        "Ed25519 signature must be exactly 64 bytes, got " + signatureBytes.length);
-            }
-            try {
-                Signature sig = Signature.getInstance("Ed25519");
-                sig.initVerify(publicKey);
-                updateSignature(sig, token, start, dot2);
-                if (!sig.verify(signatureBytes)) {
-                    return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "Ed25519 signature verification failed");
-                }
-            } catch (Exception ex) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "Ed25519 signature verification error: " + ex.getMessage());
-            }
-        } else if ("RS256".equalsIgnoreCase(alg)) {
-            if (keyResolver == null) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "RS256 algorithm not configured on policy");
-            }
-            if (header.kid() == null || header.kid().isBlank()) {
-                if (keyResolver.apply(null) == null) {
-                    return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "kid header missing for asymmetric token");
-                }
-            }
-            PublicKey publicKey = keyResolver.apply(header.kid());
-            if (publicKey == null) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE,
-                        "Unknown or unresolvable key id: " + (header.kid() != null ? header.kid() : "<unspecified>"));
-            }
-            if (!(publicKey instanceof java.security.interfaces.RSAPublicKey rsaPub)) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "Key for RS256 must be an RSAPublicKey");
-            }
-            int expectedKeyBytes = (rsaPub.getModulus().bitLength() + 7) / 8;
-            if (signatureBytes.length != expectedKeyBytes) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE,
-                        "RS256 signature length mismatch: expected " + expectedKeyBytes + " bytes, got " + signatureBytes.length);
-            }
-            try {
-                Signature sig = Signature.getInstance("SHA256withRSA");
-                sig.initVerify(publicKey);
-                updateSignature(sig, token, start, dot2);
-                if (!sig.verify(signatureBytes)) {
-                    return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "RS256 signature verification failed");
-                }
-            } catch (Exception ex) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "RS256 signature verification error: " + ex.getMessage());
-            }
-        } else if ("ES256".equalsIgnoreCase(alg)) {
-            if (keyResolver == null) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "ES256 algorithm not configured on policy");
-            }
-            if (header.kid() == null || header.kid().isBlank()) {
-                if (keyResolver.apply(null) == null) {
-                    return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "kid header missing for asymmetric token");
-                }
-            }
-            PublicKey publicKey = keyResolver.apply(header.kid());
-            if (publicKey == null) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE,
-                        "Unknown or unresolvable key id: " + (header.kid() != null ? header.kid() : "<unspecified>"));
-            }
-            if (!(publicKey instanceof java.security.interfaces.ECPublicKey)) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "Key for ES256 must be an ECPublicKey");
-            }
-            if (signatureBytes.length != 64) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE,
-                        "ES256 P1363 signature must be exactly 64 bytes (R||S), got " + signatureBytes.length);
-            }
-            try {
-                Signature sig = Signature.getInstance("SHA256withECDSAinP1363Format");
-                sig.initVerify(publicKey);
-                updateSignature(sig, token, start, dot2);
-                if (!sig.verify(signatureBytes)) {
-                    return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "ES256 signature verification failed");
-                }
-            } catch (Exception ex) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "ES256 signature verification error: " + ex.getMessage());
-            }
-        } else if ("HS256".equalsIgnoreCase(alg)) {
-            if (hmacValidator == null) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "HMAC-SHA256 algorithm not configured on policy");
-            }
-            boolean validSig = hmacValidator.verify(token, start, dot2, signatureBytes);
-            if (!validSig) {
-                return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "HMAC-SHA256 signature verification failed");
-            }
-        } else {
-            return JwtValidationResult.failure(JwtValidationStatus.INVALID_SIGNATURE, "Unsupported JWT algorithm: " + alg);
-        }
-
-        JwtValidationResult result = JwtValidationResult.valid(
-                claims.subject(),
-                claims.issuer(),
-                claims.tenantId(),
-                claims.expiresAt(),
-                claims.issuedAt()
-        );
-
-        if (cache != null && tokenHash != 0L) {
-            cache.put(tokenHash, result);
-        }
-
-        return result;
+        return checkClaims(claims);
     }
 
-    private static int skipBearerPrefix(CharSequence h) {
-        int len = h.length();
-        int i = 0;
-        while (i < len && h.charAt(i) == ' ') {
-            i++;
+    private JwtValidationResult checkClaims(JwtClaimsScanner.Claims claims) {
+        if (!expectedIssuer.equals(claims.issuer)) {
+            return JwtValidationResult.failure(JwtValidationStatus.UNAUTHORIZED_ISSUER, "Token iss is not the expected issuer");
         }
-        if (len - i < 7) {
-            return -1;
+        if (!claims.audienceMatches) {
+            return JwtValidationResult.failure(JwtValidationStatus.UNAUTHORIZED_AUDIENCE, "Token aud does not contain the expected audience");
         }
-        char c0 = h.charAt(i);
-        char c1 = h.charAt(i + 1);
-        char c2 = h.charAt(i + 2);
-        char c3 = h.charAt(i + 3);
-        char c4 = h.charAt(i + 4);
-        char c5 = h.charAt(i + 5);
-        char c6 = h.charAt(i + 6);
-
-        boolean isBearer = (c0 == 'B' || c0 == 'b') &&
-                (c1 == 'e' || c1 == 'E') &&
-                (c2 == 'a' || c2 == 'A') &&
-                (c3 == 'r' || c3 == 'R') &&
-                (c4 == 'e' || c4 == 'E') &&
-                (c5 == 'r' || c5 == 'R') &&
-                c6 == ' ';
-
-        if (!isBearer) {
-            return -1;
+        if (!claims.hasExp) {
+            return JwtValidationResult.failure(JwtValidationStatus.MISSING_CLAIM, "Token has no integer exp");
         }
-        i += 7;
-        while (i < len && h.charAt(i) == ' ') {
-            i++;
+        long exp = claims.exp;
+        long now = clock.instant().getEpochSecond();
+        if (now > exp + skewSeconds) {
+            return JwtValidationResult.failure(JwtValidationStatus.EXPIRED, "Token has expired");
         }
-        return i;
+        if (!claims.hasNbf) {
+            return JwtValidationResult.failure(JwtValidationStatus.MISSING_CLAIM, "Token has no integer nbf");
+        }
+        if (claims.nbf - skewSeconds > now) {
+            return JwtValidationResult.failure(JwtValidationStatus.PREMATURE, "Token nbf is in the future");
+        }
+        if (claims.iatWrong || (claims.hasIat && claims.iat - skewSeconds > now)) {
+            return JwtValidationResult.failure(JwtValidationStatus.PREMATURE, "Token iat is in the future or not an integer");
+        }
+        String sub = claims.subject;
+        if (sub == null || sub.isEmpty()) {
+            return JwtValidationResult.failure(JwtValidationStatus.MISSING_CLAIM, "Token has no sub");
+        }
+        if (claims.tenantWrong || claims.sessionIdWrong) {
+            return malformed("Token tenant or sid claim is not a string");
+        }
+        Set<String> scopes = scopes(claims);
+        if (claims.rolesWrong || scopes == null) {
+            return malformed("Token roles or scope claim has the wrong type");
+        }
+        return JwtValidationResult.valid(sub, expectedIssuer, claims.tenant, claims.sessionId, claims.roles, scopes,
+                exp, claims.hasIat ? claims.iat : 0L);
     }
 
-    private static final int CHUNK_SIZE = 512;
-
-    private static void updateSignature(Signature sig, CharSequence input, int start, int end) throws Exception {
-        int len = end - start;
-        byte[] buf = new byte[Math.min(len, CHUNK_SIZE)];
-        int pos = 0;
-        for (int i = 0; i < len; i++) {
-            char c = input.charAt(start + i);
-            buf[pos++] = (byte) (c <= 127 ? c : '?');
-            if (pos == buf.length) {
-                sig.update(buf, 0, pos);
-                pos = 0;
+    private static Set<String> scopes(JwtClaimsScanner.Claims claims) {
+        if (claims.scopeString != null) {
+            Set<String> out = new LinkedHashSet<>();
+            for (String part : claims.scopeString.split(" ")) {
+                if (!part.isEmpty()) {
+                    out.add(part);
+                }
             }
+            return out;
         }
-        if (pos > 0) {
-            sig.update(buf, 0, pos);
+        if (claims.scopeWrong) {
+            return null;
+        }
+        return claims.scpWrong ? null : claims.scp;
+    }
+
+    private static boolean verifySignature(JwksKeySet.JwkKey key, byte[] signingInput, byte[] signature) {
+        String jcaAlgorithm = switch (key.algorithm()) {
+            case JwksKeySet.EDDSA -> "Ed25519";
+            case JwksKeySet.RS256 -> "SHA256withRSA";
+            default -> null;
+        };
+        if (jcaAlgorithm == null) {
+            return false;
+        }
+        try {
+            Signature verifier = Signature.getInstance(jcaAlgorithm);
+            verifier.initVerify(key.publicKey());
+            verifier.update(signingInput);
+            return verifier.verify(signature);
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            return false;
         }
     }
 
-    private static int indexOf(CharSequence cs, char target, int start, int end) {
-        for (int i = start; i < end; i++) {
-            if (cs.charAt(i) == target) {
-                return i;
+    private static byte[] decodeSegment(String token, int start, int end) {
+        return Base64.getUrlDecoder().decode(token.substring(start, end));
+    }
+
+    private static boolean isCompactSerialization(String token) {
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            boolean ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_' || c == '.';
+            if (!ok) {
+                return false;
             }
         }
-        return -1;
+        return true;
+    }
+
+    private static JwtValidationResult malformed(String message) {
+        return JwtValidationResult.failure(JwtValidationStatus.MALFORMED, message);
     }
 }
