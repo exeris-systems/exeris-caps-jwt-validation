@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -61,6 +62,7 @@ public final class JwksKeySet {
     private final long refreshIntervalNanos;
     private final long minRefreshIntervalNanos;
     private final long maxStalenessNanos;
+    private final long fetchTimeoutNanos;
     private final LongSupplier nanoClock;
     private final ReentrantLock refreshLock = new ReentrantLock();
 
@@ -71,18 +73,49 @@ public final class JwksKeySet {
     private volatile long lastSuccessNanos;
 
     private JwksKeySet(Supplier<String> source, Map<String, JwkKey> keys, long refreshIntervalNanos,
-                       long minRefreshIntervalNanos, long maxStalenessNanos, LongSupplier nanoClock) {
+                       long minRefreshIntervalNanos, long maxStalenessNanos, long fetchTimeoutNanos,
+                       LongSupplier nanoClock) {
         this.source = source;
         this.keys = keys;
         this.loaded = source == null;
         this.refreshIntervalNanos = refreshIntervalNanos;
         this.minRefreshIntervalNanos = minRefreshIntervalNanos;
         this.maxStalenessNanos = maxStalenessNanos;
+        this.fetchTimeoutNanos = fetchTimeoutNanos;
         this.nanoClock = nanoClock;
     }
 
     /**
      * A key set loaded from a JWKS source on first use and refreshed as described above.
+     *
+     * @param source returns the current JWKS document; may throw on fetch failure
+     * @param refreshIntervalNanos age after which the document is reloaded
+     * @param minRefreshIntervalNanos minimum spacing of reloads, including those an unknown {@code kid} triggers
+     * @param maxStalenessNanos maximum age of keys since the last successful load before they are refused
+     * @param fetchTimeoutNanos deadline for fetching the document and waiting on the refresh lock
+     * @param nanoClock monotonic clock
+     * @return the key set
+     */
+    public static JwksKeySet fromSource(Supplier<String> source, long refreshIntervalNanos,
+                                        long minRefreshIntervalNanos, long maxStalenessNanos,
+                                        long fetchTimeoutNanos, LongSupplier nanoClock) {
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(nanoClock, "nanoClock");
+        if (minRefreshIntervalNanos <= 0 || refreshIntervalNanos < minRefreshIntervalNanos) {
+            throw new IllegalArgumentException("refresh interval must be >= the minimum refresh interval > 0");
+        }
+        if (maxStalenessNanos <= refreshIntervalNanos) {
+            throw new IllegalArgumentException("maximum staleness must be > the refresh interval");
+        }
+        if (fetchTimeoutNanos <= 0) {
+            throw new IllegalArgumentException("fetch timeout must be > 0");
+        }
+        return new JwksKeySet(source, Map.of(), refreshIntervalNanos, minRefreshIntervalNanos,
+                maxStalenessNanos, fetchTimeoutNanos, nanoClock);
+    }
+
+    /**
+     * A key set loaded from a JWKS source on first use and refreshed as described above, with default maximum staleness.
      *
      * @param source returns the current JWKS document; may throw on fetch failure
      * @param refreshIntervalNanos age after which the document is reloaded
@@ -94,16 +127,8 @@ public final class JwksKeySet {
     public static JwksKeySet fromSource(Supplier<String> source, long refreshIntervalNanos,
                                         long minRefreshIntervalNanos, long maxStalenessNanos,
                                         LongSupplier nanoClock) {
-        Objects.requireNonNull(source, "source");
-        Objects.requireNonNull(nanoClock, "nanoClock");
-        if (minRefreshIntervalNanos <= 0 || refreshIntervalNanos < minRefreshIntervalNanos) {
-            throw new IllegalArgumentException("refresh interval must be >= the minimum refresh interval > 0");
-        }
-        if (maxStalenessNanos <= refreshIntervalNanos) {
-            throw new IllegalArgumentException("maximum staleness must be > the refresh interval");
-        }
-        return new JwksKeySet(source, Map.of(), refreshIntervalNanos, minRefreshIntervalNanos,
-                maxStalenessNanos, nanoClock);
+        return fromSource(source, refreshIntervalNanos, minRefreshIntervalNanos, maxStalenessNanos,
+                2_000_000_000L, nanoClock);
     }
 
     /**
@@ -118,7 +143,8 @@ public final class JwksKeySet {
     public static JwksKeySet fromSource(Supplier<String> source, long refreshIntervalNanos,
                                         long minRefreshIntervalNanos, LongSupplier nanoClock) {
         return fromSource(source, refreshIntervalNanos, minRefreshIntervalNanos,
-                Math.max(refreshIntervalNanos + 1, 86400L * 1_000_000_000L), nanoClock);
+                Math.max(refreshIntervalNanos + 1, 86400L * 1_000_000_000L),
+                2_000_000_000L, nanoClock);
     }
 
     /**
@@ -136,7 +162,7 @@ public final class JwksKeySet {
             requireUsable(key);
         }
         return new JwksKeySet(null, Map.copyOf(byKid), Long.MAX_VALUE, Long.MAX_VALUE,
-                Long.MAX_VALUE, System::nanoTime);
+                Long.MAX_VALUE, Long.MAX_VALUE, System::nanoTime);
     }
 
     /**
@@ -159,16 +185,18 @@ public final class JwksKeySet {
     /**
      * Finds the key for {@code kid}, reloading the source first when it is stale and once more when the
      * {@code kid} is unknown and the minimum refresh interval has passed. Keys older than the maximum
-     * staleness are refused.
+     * staleness are refused. Waiters on the refresh lock are bounded by the fetch deadline and fail closed.
      *
      * @param kid key id from the token header
-     * @return the key, or empty when the issuer publishes no such key or the key set is stale
+     * @return the key, or empty when the issuer publishes no such key, lock wait timed out, or the key set is stale
      */
     public Optional<JwkKey> find(String kid) {
         if (source != null) {
             long now = nanoClock.getAsLong();
             if (!loaded || now - lastSuccessNanos >= refreshIntervalNanos) {
-                refresh(now);
+                if (!refresh(now)) {
+                    return Optional.empty();
+                }
                 now = nanoClock.getAsLong();
             }
             if (hasSuccess && now - lastSuccessNanos >= maxStalenessNanos) {
@@ -178,9 +206,10 @@ public final class JwksKeySet {
         JwkKey key = keys.get(kid);
         if (key == null && source != null) {
             long now = nanoClock.getAsLong();
-            refresh(now);
-            now = nanoClock.getAsLong();
-            if (hasSuccess && now - lastSuccessNanos >= maxStalenessNanos) {
+            if (!refresh(now)) {
+                return Optional.empty();
+            }
+            if (hasSuccess && nanoClock.getAsLong() - lastSuccessNanos >= maxStalenessNanos) {
                 return Optional.empty();
             }
             key = keys.get(kid);
@@ -188,25 +217,36 @@ public final class JwksKeySet {
         return Optional.ofNullable(key);
     }
 
-    private void refresh(long now) {
-        if (loaded && now - lastAttemptNanos < minRefreshIntervalNanos) {
-            return;
+    private boolean refresh(long now) {
+        if (loaded && !refreshLock.isLocked() && now - lastAttemptNanos < minRefreshIntervalNanos) {
+            return true;
         }
-        refreshLock.lock();
+        boolean acquired;
         try {
-            if (loaded && now - lastAttemptNanos < minRefreshIntervalNanos) {
-                return;
+            acquired = refreshLock.tryLock(fetchTimeoutNanos, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        if (!acquired) {
+            return false;
+        }
+        try {
+            long current = nanoClock.getAsLong();
+            if (loaded && current - lastAttemptNanos < minRefreshIntervalNanos) {
+                return true;
             }
-            lastAttemptNanos = now;
+            lastAttemptNanos = current;
             try {
                 keys = parse(source.get());
-                lastSuccessNanos = now;
+                lastSuccessNanos = current;
                 hasSuccess = true;
             } catch (RuntimeException fetchOrParseFailure) {
                 // The previous keys stay in force until maximum staleness is reached;
                 // the next attempt waits for the minimum interval.
             }
             loaded = true;
+            return true;
         } finally {
             refreshLock.unlock();
         }

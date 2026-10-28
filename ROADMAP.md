@@ -18,17 +18,7 @@ tracking issue in the `0.1.0` milestone. An item under "Later" does not block it
 
 ## Before 0.1.0
 
-### The verification decision reaches the network
-
-Tracked in [#11](https://github.com/exeris-systems/exeris-caps-jwt-validation/issues/11).
-
-`DefaultJwtAdmissionPolicy.validateToken` calls `JwksKeySet.find`, which fetches the JWKS on the request
-thread on first use, on a stale document and on an unknown `kid`, and other callers wait on the refresh
-lock for up to the fetch deadline. The README and rule S8 in `docs/repo-review-rules.md` say the
-decision reads no network. Either the fetch moves off the request thread, or the documents state the
-bounded synchronous fetch as the design and the lock wait is bounded. The code is
-`src/main/java/eu/exeris/caps/jwt/internal/JwksKeySet.java` and
-`src/main/java/eu/exeris/caps/jwt/internal/DefaultJwtAdmissionPolicy.java`.
+None — all items blocking 0.1.0 are closed.
 
 ## Later
 

@@ -27,10 +27,11 @@ No verification result is cached: every request verifies its token's signature.
 
 ## JWKS fetch
 
-The capability fetches the issuer's JWKS itself; the verification decision reads no network. The fetch is bounded:
+The capability fetches the issuer's JWKS itself. The verification decision works on the keys `JwksKeySet` holds, with an intentional bounded synchronous fetch on a miss (on first use, when the document is older than `jwks-refresh-seconds`, and on an unknown `kid` at most once per `jwks-min-refresh-seconds`). Waiters on the refresh lock are bounded by the fetch deadline (`jwks-timeout-millis`) and fail closed. The fetch is bounded:
 
 - it goes only to the configured `exeris.caps.jwt.jwks-uri`, over HTTPS or, on a loopback host, HTTP, and follows no redirect;
 - one deadline covers the whole fetch, connecting, headers and body (`jwks-timeout-millis`);
+- waiters on the refresh lock are bounded by the fetch deadline (`jwks-timeout-millis`) and fail closed on timeout;
 - the body is capped at 64 KiB, enforced while it streams;
 - a refresh is single-flight: concurrent requests share one fetch. Keys are reloaded when older than `jwks-refresh-seconds`, and an unknown `kid` triggers a reload at most once per `jwks-min-refresh-seconds`;
 - a failed fetch keeps the previous keys until the last successful load is older than `jwks-max-staleness-seconds`, after which all keys are refused.

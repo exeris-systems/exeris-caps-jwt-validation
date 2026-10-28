@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Base64;
+import java.util.function.Supplier;
 
 import static eu.exeris.caps.jwt.internal.TestTokens.AUDIENCE;
 import static eu.exeris.caps.jwt.internal.TestTokens.ISSUER;
@@ -231,6 +232,43 @@ class DefaultJwtAdmissionPolicyTest {
             nanos.addAndGet(Duration.ofSeconds(15).toNanos());
             assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
             assertThat(fetches).hasValue(5);
+        }
+
+        @Test
+        @DisplayName("a token validation whose JWKS refresh lock wait times out returns UNKNOWN_KEY")
+        void lockTimeoutReturnsUnknownKey() throws Exception {
+            java.util.concurrent.CountDownLatch fetchStarted = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch finishFetch = new java.util.concurrent.CountDownLatch(1);
+            Supplier<String> source = () -> {
+                fetchStarted.countDown();
+                try {
+                    finishFetch.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return TestTokens.jwks(TestTokens.okpJwk("ed-1", ED));
+            };
+            JwtAdmissionPolicy policy = JwtAdmissionPolicies.builder()
+                    .jwksSupplier(source)
+                    .expectedIssuer(ISSUER)
+                    .expectedAudience(AUDIENCE)
+                    .jwksTimeout(Duration.ofMillis(50))
+                    .clock(Clock.fixed(Instant.ofEpochSecond(NOW), ZoneOffset.UTC))
+                    .build();
+
+            String token = TestTokens.eddsa("ed-1", ED.getPrivate(), validClaims());
+            Thread holder = new Thread(() -> policy.validateToken(token));
+            holder.start();
+            assertThat(fetchStarted.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+            // Calling validateToken while lock is held times out after 50ms and fails closed with UNKNOWN_KEY
+            assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+
+            finishFetch.countDown();
+            holder.join();
+
+            // Valid once lock is released and fetch completed
+            assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.VALID);
         }
     }
 

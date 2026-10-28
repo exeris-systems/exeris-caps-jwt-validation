@@ -25,7 +25,7 @@ import java.util.function.Supplier;
  *
  * <p>Uses the JDK HTTP client, so the capability keeps no runtime dependency. A fetch that passes the deadline,
  * answers anything but 200, or exceeds the size bound is abandoned and throws; {@link JwksKeySet} then keeps the keys it
- * had. Redirects are not followed, so the configured URI is the only place keys come from.
+ * had until maximum staleness is reached. Redirects are not followed, so the configured URI is the only place keys come from.
  *
  * @since 0.1.0
  */

@@ -4,6 +4,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.security.KeyPair;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -152,5 +155,146 @@ class JwksKeySetTest {
                 JwksKeySet.fromSource(() -> "{}", 300 * SECOND, 30 * SECOND, 200 * SECOND, () -> 0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("maximum staleness must be > the refresh interval");
+    }
+
+    @Test
+    @DisplayName("on first use, concurrent waiters on the refresh lock time out after the fetch deadline and fail closed")
+    void firstUseLockTimeoutFailsClosed() throws Exception {
+        CountDownLatch fetchStarted = new CountDownLatch(1);
+        CountDownLatch finishFetch = new CountDownLatch(1);
+        AtomicInteger fetches = new AtomicInteger();
+        Supplier<String> source = () -> {
+            fetches.incrementAndGet();
+            fetchStarted.countDown();
+            try {
+                finishFetch.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return TestTokens.jwks(TestTokens.okpJwk("k1", ED_1));
+        };
+        // fetchTimeout = 50ms
+        JwksKeySet keySet = JwksKeySet.fromSource(source, 300 * SECOND, 30 * SECOND,
+                86400 * SECOND, 50 * 1_000_000L, System::nanoTime);
+
+        Thread holder = new Thread(() -> keySet.find("k1"));
+        holder.start();
+        assertThat(fetchStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // Calling find on another thread while fetch is in progress times out after 50ms and fails closed
+        assertThat(keySet.find("k1")).isEmpty();
+
+        finishFetch.countDown();
+        holder.join();
+
+        // Now that the lock is released, find succeeds with the loaded key
+        assertThat(keySet.find("k1")).isPresent();
+        assertThat(fetches).hasValue(1);
+    }
+
+    @Test
+    @DisplayName("on a stale document, concurrent waiters on the refresh lock time out after the fetch deadline and fail closed")
+    void staleDocumentLockTimeoutFailsClosed() throws Exception {
+        AtomicLong clock = new AtomicLong(0);
+        CountDownLatch refreshStarted = new CountDownLatch(1);
+        CountDownLatch finishRefresh = new CountDownLatch(1);
+        AtomicBoolean blocking = new AtomicBoolean(false);
+        AtomicInteger fetches = new AtomicInteger();
+        Supplier<String> source = () -> {
+            fetches.incrementAndGet();
+            if (blocking.get()) {
+                refreshStarted.countDown();
+                try {
+                    finishRefresh.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return TestTokens.jwks(TestTokens.okpJwk("k1", ED_1));
+        };
+        // fetchTimeout = 50ms
+        JwksKeySet keySet = JwksKeySet.fromSource(source, 300 * SECOND, 30 * SECOND,
+                86400 * SECOND, 50 * 1_000_000L, clock::get);
+
+        // Initial load succeeds
+        assertThat(keySet.find("k1")).isPresent();
+        assertThat(fetches).hasValue(1);
+
+        // Document becomes stale (> 300s)
+        clock.set(301 * SECOND);
+        blocking.set(true);
+
+        Thread holder = new Thread(() -> keySet.find("k1"));
+        holder.start();
+        assertThat(refreshStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // Concurrent caller on stale document times out waiting on the lock and fails closed
+        assertThat(keySet.find("k1")).isEmpty();
+
+        finishRefresh.countDown();
+        holder.join();
+
+        // After refresh finishes, key is accessible
+        assertThat(keySet.find("k1")).isPresent();
+    }
+
+    @Test
+    @DisplayName("on an unknown kid, concurrent waiters on the refresh lock time out after the fetch deadline and fail closed")
+    void unknownKidLockTimeoutFailsClosed() throws Exception {
+        AtomicLong clock = new AtomicLong(0);
+        CountDownLatch refreshStarted = new CountDownLatch(1);
+        CountDownLatch finishRefresh = new CountDownLatch(1);
+        AtomicBoolean blocking = new AtomicBoolean(false);
+        AtomicInteger fetches = new AtomicInteger();
+        Supplier<String> source = () -> {
+            fetches.incrementAndGet();
+            if (blocking.get()) {
+                refreshStarted.countDown();
+                try {
+                    finishRefresh.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return TestTokens.jwks(TestTokens.okpJwk("k1", ED_1), TestTokens.okpJwk("k2", ED_2));
+            }
+            return TestTokens.jwks(TestTokens.okpJwk("k1", ED_1));
+        };
+        // fetchTimeout = 50ms
+        JwksKeySet keySet = JwksKeySet.fromSource(source, 300 * SECOND, 30 * SECOND,
+                86400 * SECOND, 50 * 1_000_000L, clock::get);
+
+        assertThat(keySet.find("k1")).isPresent();
+        assertThat(fetches).hasValue(1);
+
+        // Unknown kid triggers refresh
+        clock.set(31 * SECOND);
+        blocking.set(true);
+
+        Thread holder = new Thread(() -> keySet.find("k2"));
+        holder.start();
+        assertThat(refreshStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // Concurrent caller for unknown kid times out waiting on the lock and fails closed
+        assertThat(keySet.find("k2")).isEmpty();
+
+        finishRefresh.countDown();
+        holder.join();
+
+        // After refresh finishes, k2 is present
+        assertThat(keySet.find("k2")).isPresent();
+    }
+
+    @Test
+    @DisplayName("fromSource requires positive fetch timeout")
+    void fromSourceValidatesFetchTimeout() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                JwksKeySet.fromSource(() -> "{}", 300 * SECOND, 30 * SECOND, 600 * SECOND, 0, () -> 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("fetch timeout must be > 0");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                JwksKeySet.fromSource(() -> "{}", 300 * SECOND, 30 * SECOND, 600 * SECOND, -1, () -> 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("fetch timeout must be > 0");
     }
 }

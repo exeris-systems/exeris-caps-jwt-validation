@@ -293,7 +293,8 @@ public final class JwtAdmissionPolicies {
             } else {
                 Supplier<String> source = jwksSupplier != null ? jwksSupplier : new HttpJwksFetcher(jwksUri, jwksTimeout);
                 keySet = JwksKeySet.fromSource(source, jwksRefreshInterval.toNanos(),
-                        jwksMinRefreshInterval.toNanos(), jwksMaxStaleness.toNanos(), nanoClock);
+                        jwksMinRefreshInterval.toNanos(), jwksMaxStaleness.toNanos(),
+                        jwksTimeout.toNanos(), nanoClock);
             }
             return new DefaultJwtAdmissionPolicy(keySet, acceptedAlgorithms, expectedIssuer.strip(),
                     expectedAudience.strip(), clockSkew.toSeconds(), tenantClaim, clock);
