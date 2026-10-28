@@ -179,6 +179,59 @@ class DefaultJwtAdmissionPolicyTest {
             assertThat(status(TestTokens.eddsa("ed-unknown", ED.getPrivate(), validClaims())))
                     .isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
         }
+
+        @Test
+        @DisplayName("repeated failed reloads past maximum staleness cause a previously accepted token to be refused with UNKNOWN_KEY")
+        void repeatedFailedReloadsPastMaxStalenessRefusesToken() {
+            java.util.concurrent.atomic.AtomicBoolean failing = new java.util.concurrent.atomic.AtomicBoolean(false);
+            java.util.concurrent.atomic.AtomicInteger fetches = new java.util.concurrent.atomic.AtomicInteger();
+            java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong(100L * 1_000_000_000L);
+            JwtAdmissionPolicy policy = JwtAdmissionPolicies.builder()
+                    .jwksSupplier(() -> {
+                        fetches.incrementAndGet();
+                        if (failing.get()) {
+                            throw new IllegalStateException("JWKS endpoint unreachable");
+                        }
+                        return TestTokens.jwks(TestTokens.okpJwk("ed-1", ED));
+                    })
+                    .expectedIssuer(ISSUER)
+                    .expectedAudience(AUDIENCE)
+                    .jwksRefreshInterval(Duration.ofSeconds(60))
+                    .jwksMinRefreshInterval(Duration.ofSeconds(10))
+                    .jwksMaxStaleness(Duration.ofSeconds(180))
+                    .clock(Clock.fixed(Instant.ofEpochSecond(NOW), ZoneOffset.UTC))
+                    .nanoClock(nanos::get)
+                    .build();
+
+            String token = TestTokens.eddsa("ed-1", ED.getPrivate(), validClaims());
+
+            // 1. Initial use: token is accepted
+            assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.VALID);
+            assertThat(fetches).hasValue(1);
+
+            // JWKS endpoint starts failing
+            failing.set(true);
+
+            // 2. Beyond refresh interval (+70s), but within max staleness (+180s)
+            nanos.addAndGet(Duration.ofSeconds(70).toNanos());
+            assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.VALID);
+            assertThat(fetches).hasValue(2);
+
+            // 3. Repeated failed reload attempt past min-refresh (+20s)
+            nanos.addAndGet(Duration.ofSeconds(20).toNanos());
+            assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.VALID);
+            assertThat(fetches).hasValue(3);
+
+            // 4. Drive failed reloads past the maximum staleness limit (+100s, total 190s since success)
+            nanos.addAndGet(Duration.ofSeconds(100).toNanos());
+            assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+            assertThat(fetches).hasValue(4);
+
+            // 5. Subsequent attempts past the limit keep refusing
+            nanos.addAndGet(Duration.ofSeconds(15).toNanos());
+            assertThat(policy.validateToken(token).status()).isEqualTo(JwtValidationStatus.UNKNOWN_KEY);
+            assertThat(fetches).hasValue(5);
+        }
     }
 
     @Nested
@@ -425,6 +478,27 @@ class DefaultJwtAdmissionPolicyTest {
         }
 
         @Test
+        void aMaxStalenessBelowOrEqualToRefreshIntervalNamesBothProperties() {
+            assertThatThrownBy(() -> JwtAdmissionPolicies.fromProperties(java.util.Map.of(
+                    JwtAdmissionPolicies.KEY_ISSUER, ISSUER,
+                    JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
+                    JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS, "300",
+                    JwtAdmissionPolicies.KEY_JWKS_MAX_STALENESS_SECONDS, "300"), () -> JWKS))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_MAX_STALENESS_SECONDS)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS);
+
+            assertThatThrownBy(() -> JwtAdmissionPolicies.fromProperties(java.util.Map.of(
+                    JwtAdmissionPolicies.KEY_ISSUER, ISSUER,
+                    JwtAdmissionPolicies.KEY_AUDIENCE, AUDIENCE,
+                    JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS, "300",
+                    JwtAdmissionPolicies.KEY_JWKS_MAX_STALENESS_SECONDS, "200"), () -> JWKS))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_MAX_STALENESS_SECONDS)
+                    .hasMessageContaining(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS);
+        }
+
+        @Test
         void anUnparseableStaticJwksIsIllegalStateNamingTheSource() {
             assertThatThrownBy(() -> JwtAdmissionPolicies.builder().jwks("not json")
                     .expectedIssuer(ISSUER).expectedAudience(AUDIENCE).build())
@@ -435,7 +509,8 @@ class DefaultJwtAdmissionPolicyTest {
         @Test
         void aJwksIntervalOutsideItsBoundsIsRejectedAsIllegalState() {
             for (String key : java.util.List.of(JwtAdmissionPolicies.KEY_JWKS_REFRESH_SECONDS,
-                    JwtAdmissionPolicies.KEY_JWKS_MIN_REFRESH_SECONDS, JwtAdmissionPolicies.KEY_JWKS_TIMEOUT_MILLIS)) {
+                    JwtAdmissionPolicies.KEY_JWKS_MIN_REFRESH_SECONDS, JwtAdmissionPolicies.KEY_JWKS_TIMEOUT_MILLIS,
+                    JwtAdmissionPolicies.KEY_JWKS_MAX_STALENESS_SECONDS)) {
                 for (String bad : java.util.List.of(String.valueOf(Long.MAX_VALUE), "0", "-5")) {
                     assertThatThrownBy(() -> JwtAdmissionPolicies.fromProperties(java.util.Map.of(
                             JwtAdmissionPolicies.KEY_ISSUER, ISSUER,

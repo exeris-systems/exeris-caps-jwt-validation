@@ -25,7 +25,8 @@ import java.util.function.Supplier;
  *
  * <p>A key set backed by a JWKS source reloads the document when it is older than the refresh interval,
  * and on a {@code kid} it does not know, at most once per minimum refresh interval, so a stream of tokens
- * with invented {@code kid}s cannot turn into a stream of fetches. A failed reload keeps the keys it had.
+ * with invented {@code kid}s cannot turn into a stream of fetches. A failed reload keeps the keys it had
+ * until the last successful load is older than the maximum staleness, after which every key is refused.
  *
  * @since 0.1.0
  */
@@ -59,21 +60,24 @@ public final class JwksKeySet {
     private final Supplier<String> source;
     private final long refreshIntervalNanos;
     private final long minRefreshIntervalNanos;
+    private final long maxStalenessNanos;
     private final LongSupplier nanoClock;
     private final ReentrantLock refreshLock = new ReentrantLock();
 
     private volatile Map<String, JwkKey> keys;
     private volatile boolean loaded;
+    private volatile boolean hasSuccess;
     private volatile long lastAttemptNanos;
     private volatile long lastSuccessNanos;
 
     private JwksKeySet(Supplier<String> source, Map<String, JwkKey> keys, long refreshIntervalNanos,
-                       long minRefreshIntervalNanos, LongSupplier nanoClock) {
+                       long minRefreshIntervalNanos, long maxStalenessNanos, LongSupplier nanoClock) {
         this.source = source;
         this.keys = keys;
         this.loaded = source == null;
         this.refreshIntervalNanos = refreshIntervalNanos;
         this.minRefreshIntervalNanos = minRefreshIntervalNanos;
+        this.maxStalenessNanos = maxStalenessNanos;
         this.nanoClock = nanoClock;
     }
 
@@ -83,17 +87,38 @@ public final class JwksKeySet {
      * @param source returns the current JWKS document; may throw on fetch failure
      * @param refreshIntervalNanos age after which the document is reloaded
      * @param minRefreshIntervalNanos minimum spacing of reloads, including those an unknown {@code kid} triggers
+     * @param maxStalenessNanos maximum age of keys since the last successful load before they are refused
      * @param nanoClock monotonic clock
      * @return the key set
      */
     public static JwksKeySet fromSource(Supplier<String> source, long refreshIntervalNanos,
-                                        long minRefreshIntervalNanos, LongSupplier nanoClock) {
+                                        long minRefreshIntervalNanos, long maxStalenessNanos,
+                                        LongSupplier nanoClock) {
         Objects.requireNonNull(source, "source");
         Objects.requireNonNull(nanoClock, "nanoClock");
         if (minRefreshIntervalNanos <= 0 || refreshIntervalNanos < minRefreshIntervalNanos) {
             throw new IllegalArgumentException("refresh interval must be >= the minimum refresh interval > 0");
         }
-        return new JwksKeySet(source, Map.of(), refreshIntervalNanos, minRefreshIntervalNanos, nanoClock);
+        if (maxStalenessNanos <= refreshIntervalNanos) {
+            throw new IllegalArgumentException("maximum staleness must be > the refresh interval");
+        }
+        return new JwksKeySet(source, Map.of(), refreshIntervalNanos, minRefreshIntervalNanos,
+                maxStalenessNanos, nanoClock);
+    }
+
+    /**
+     * A key set loaded from a JWKS source on first use and refreshed as described above, with default maximum staleness.
+     *
+     * @param source returns the current JWKS document; may throw on fetch failure
+     * @param refreshIntervalNanos age after which the document is reloaded
+     * @param minRefreshIntervalNanos minimum spacing of reloads, including those an unknown {@code kid} triggers
+     * @param nanoClock monotonic clock
+     * @return the key set
+     */
+    public static JwksKeySet fromSource(Supplier<String> source, long refreshIntervalNanos,
+                                        long minRefreshIntervalNanos, LongSupplier nanoClock) {
+        return fromSource(source, refreshIntervalNanos, minRefreshIntervalNanos,
+                Math.max(refreshIntervalNanos + 1, 86400L * 1_000_000_000L), nanoClock);
     }
 
     /**
@@ -110,7 +135,8 @@ public final class JwksKeySet {
             }
             requireUsable(key);
         }
-        return new JwksKeySet(null, Map.copyOf(byKid), Long.MAX_VALUE, Long.MAX_VALUE, System::nanoTime);
+        return new JwksKeySet(null, Map.copyOf(byKid), Long.MAX_VALUE, Long.MAX_VALUE,
+                Long.MAX_VALUE, System::nanoTime);
     }
 
     /**
@@ -132,21 +158,31 @@ public final class JwksKeySet {
 
     /**
      * Finds the key for {@code kid}, reloading the source first when it is stale and once more when the
-     * {@code kid} is unknown and the minimum refresh interval has passed.
+     * {@code kid} is unknown and the minimum refresh interval has passed. Keys older than the maximum
+     * staleness are refused.
      *
      * @param kid key id from the token header
-     * @return the key, or empty when the issuer publishes no such key
+     * @return the key, or empty when the issuer publishes no such key or the key set is stale
      */
     public Optional<JwkKey> find(String kid) {
         if (source != null) {
             long now = nanoClock.getAsLong();
             if (!loaded || now - lastSuccessNanos >= refreshIntervalNanos) {
                 refresh(now);
+                now = nanoClock.getAsLong();
+            }
+            if (hasSuccess && now - lastSuccessNanos >= maxStalenessNanos) {
+                return Optional.empty();
             }
         }
         JwkKey key = keys.get(kid);
         if (key == null && source != null) {
-            refresh(nanoClock.getAsLong());
+            long now = nanoClock.getAsLong();
+            refresh(now);
+            now = nanoClock.getAsLong();
+            if (hasSuccess && now - lastSuccessNanos >= maxStalenessNanos) {
+                return Optional.empty();
+            }
             key = keys.get(kid);
         }
         return Optional.ofNullable(key);
@@ -165,8 +201,10 @@ public final class JwksKeySet {
             try {
                 keys = parse(source.get());
                 lastSuccessNanos = now;
+                hasSuccess = true;
             } catch (RuntimeException fetchOrParseFailure) {
-                // The previous keys stay in force; the next attempt waits for the minimum interval.
+                // The previous keys stay in force until maximum staleness is reached;
+                // the next attempt waits for the minimum interval.
             }
             loaded = true;
         } finally {

@@ -49,12 +49,15 @@ public final class JwtAdmissionPolicies {
     public static final String KEY_JWKS_REFRESH_SECONDS = "exeris.caps.jwt.jwks-refresh-seconds";
     /** Minimum seconds between JWKS reloads, including those an unknown {@code kid} triggers; default 30. */
     public static final String KEY_JWKS_MIN_REFRESH_SECONDS = "exeris.caps.jwt.jwks-min-refresh-seconds";
+    /** Maximum seconds keys stay trusted after failed reloads; default 86400. */
+    public static final String KEY_JWKS_MAX_STALENESS_SECONDS = "exeris.caps.jwt.jwks-max-staleness-seconds";
 
     /** Default name of the tenant claim. */
     public static final String DEFAULT_TENANT_CLAIM = "tid";
 
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(5);
     private static final Duration MAX_JWKS_INTERVAL = Duration.ofDays(1);
+    private static final Duration MAX_JWKS_STALENESS = Duration.ofDays(7);
     private static final Set<String> SUPPORTED_ALGORITHMS = Set.of("EdDSA", "RS256");
 
     private JwtAdmissionPolicies() {
@@ -88,7 +91,8 @@ public final class JwtAdmissionPolicies {
                 .clockSkew(Duration.ofSeconds(longValue(properties, KEY_CLOCK_SKEW_SECONDS, 30)))
                 .jwksTimeout(Duration.ofMillis(longValue(properties, KEY_JWKS_TIMEOUT_MILLIS, 2000)))
                 .jwksRefreshInterval(Duration.ofSeconds(longValue(properties, KEY_JWKS_REFRESH_SECONDS, 300)))
-                .jwksMinRefreshInterval(Duration.ofSeconds(longValue(properties, KEY_JWKS_MIN_REFRESH_SECONDS, 30)));
+                .jwksMinRefreshInterval(Duration.ofSeconds(longValue(properties, KEY_JWKS_MIN_REFRESH_SECONDS, 30)))
+                .jwksMaxStaleness(Duration.ofSeconds(longValue(properties, KEY_JWKS_MAX_STALENESS_SECONDS, 86400)));
         String algorithms = properties.get(KEY_ALGORITHMS);
         if (algorithms != null) {
             Set<String> accepted = new LinkedHashSet<>();
@@ -120,10 +124,10 @@ public final class JwtAdmissionPolicies {
         }
     }
 
-    private static void requireWithinBounds(Duration value, String key, String unit, long millisPerUnit) {
-        if (value.isNegative() || value.isZero() || value.compareTo(MAX_JWKS_INTERVAL) > 0) {
+    private static void requireWithinBounds(Duration value, Duration max, String key, String unit, long millisPerUnit) {
+        if (value.isNegative() || value.isZero() || value.compareTo(max) > 0) {
             throw new IllegalStateException(key + " must be between 1 and "
-                    + MAX_JWKS_INTERVAL.toMillis() / millisPerUnit + " " + unit);
+                    + max.toMillis() / millisPerUnit + " " + unit);
         }
     }
 
@@ -143,6 +147,7 @@ public final class JwtAdmissionPolicies {
         private Duration jwksTimeout = Duration.ofSeconds(2);
         private Duration jwksRefreshInterval = Duration.ofMinutes(5);
         private Duration jwksMinRefreshInterval = Duration.ofSeconds(30);
+        private Duration jwksMaxStaleness = Duration.ofDays(1);
         private Clock clock = Clock.systemUTC();
         private LongSupplier nanoClock = System::nanoTime;
 
@@ -224,6 +229,12 @@ public final class JwtAdmissionPolicies {
             return this;
         }
 
+        /** Maximum duration that keys stay trusted after failed reloads; must be greater than {@link #jwksRefreshInterval}. */
+        public Builder jwksMaxStaleness(Duration maxStaleness) {
+            this.jwksMaxStaleness = Objects.requireNonNull(maxStaleness, "maxStaleness");
+            return this;
+        }
+
         /** Wall clock for {@code exp}, {@code nbf} and {@code iat}. */
         public Builder clock(Clock clock) {
             this.clock = Objects.requireNonNull(clock, "clock");
@@ -251,12 +262,17 @@ public final class JwtAdmissionPolicies {
             if (clockSkew.isNegative() || clockSkew.compareTo(MAX_CLOCK_SKEW) > 0) {
                 throw new IllegalStateException("Clock skew must be between 0 and " + MAX_CLOCK_SKEW.toSeconds() + " seconds");
             }
-            requireWithinBounds(jwksTimeout, KEY_JWKS_TIMEOUT_MILLIS, "milliseconds", 1);
-            requireWithinBounds(jwksRefreshInterval, KEY_JWKS_REFRESH_SECONDS, "seconds", 1000);
-            requireWithinBounds(jwksMinRefreshInterval, KEY_JWKS_MIN_REFRESH_SECONDS, "seconds", 1000);
+            requireWithinBounds(jwksTimeout, MAX_JWKS_INTERVAL, KEY_JWKS_TIMEOUT_MILLIS, "milliseconds", 1);
+            requireWithinBounds(jwksRefreshInterval, MAX_JWKS_INTERVAL, KEY_JWKS_REFRESH_SECONDS, "seconds", 1000);
+            requireWithinBounds(jwksMinRefreshInterval, MAX_JWKS_INTERVAL, KEY_JWKS_MIN_REFRESH_SECONDS, "seconds", 1000);
+            requireWithinBounds(jwksMaxStaleness, MAX_JWKS_STALENESS, KEY_JWKS_MAX_STALENESS_SECONDS, "seconds", 1000);
             if (jwksRefreshInterval.compareTo(jwksMinRefreshInterval) < 0) {
                 throw new IllegalStateException(KEY_JWKS_REFRESH_SECONDS + " must not be smaller than "
                         + KEY_JWKS_MIN_REFRESH_SECONDS);
+            }
+            if (jwksMaxStaleness.compareTo(jwksRefreshInterval) <= 0) {
+                throw new IllegalStateException(KEY_JWKS_MAX_STALENESS_SECONDS + " must be greater than "
+                        + KEY_JWKS_REFRESH_SECONDS);
             }
             if (acceptedAlgorithms.isEmpty() || !SUPPORTED_ALGORITHMS.containsAll(acceptedAlgorithms)) {
                 throw new IllegalStateException("Accepted algorithms must be a non-empty subset of " + SUPPORTED_ALGORITHMS);
@@ -277,7 +293,7 @@ public final class JwtAdmissionPolicies {
             } else {
                 Supplier<String> source = jwksSupplier != null ? jwksSupplier : new HttpJwksFetcher(jwksUri, jwksTimeout);
                 keySet = JwksKeySet.fromSource(source, jwksRefreshInterval.toNanos(),
-                        jwksMinRefreshInterval.toNanos(), nanoClock);
+                        jwksMinRefreshInterval.toNanos(), jwksMaxStaleness.toNanos(), nanoClock);
             }
             return new DefaultJwtAdmissionPolicy(keySet, acceptedAlgorithms, expectedIssuer.strip(),
                     expectedAudience.strip(), clockSkew.toSeconds(), tenantClaim, clock);

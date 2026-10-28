@@ -18,16 +18,6 @@ tracking issue in the `0.1.0` milestone. An item under "Later" does not block it
 
 ## Before 0.1.0
 
-### Maximum staleness of the JWKS keys
-
-Tracked in [#10](https://github.com/exeris-systems/exeris-caps-jwt-validation/issues/10).
-
-A failed reload keeps the previous keys, and nothing bounds how long the keys may stay in force. While
-the issuer's JWKS endpoint is down, a key the issuer has withdrawn keeps verifying tokens, so a "valid"
-outcome can rest on a key set of unbounded age. The capability should refuse every key once the last
-successful load is older than a configured maximum. The code is `JwksKeySet.find` and
-`JwksKeySet.refresh` in `src/main/java/eu/exeris/caps/jwt/internal/JwksKeySet.java`.
-
 ### The verification decision reaches the network
 
 Tracked in [#11](https://github.com/exeris-systems/exeris-caps-jwt-validation/issues/11).

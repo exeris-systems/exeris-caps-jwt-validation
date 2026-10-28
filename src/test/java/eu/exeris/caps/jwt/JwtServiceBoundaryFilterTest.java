@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.security.KeyPair;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -161,6 +162,54 @@ class JwtServiceBoundaryFilterTest {
         String claims = TestTokens.validClaims().replace(TestTokens.SUBJECT, "alice");
         assertThat(send(HttpMethod.GET, "/me", "Bearer " + TestTokens.eddsa("ed-1", ED.getPrivate(), claims)).status)
                 .isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    @DisplayName("a token verified under a dynamic JWKS is answered 401 once failed reloads pass maximum staleness")
+    void filterRefusesStaleJwks() {
+        ServiceBoundaryCoreModule sbc = new ServiceBoundaryCoreModule();
+        ApiSurfaceRegistry localRegistry = sbc.apiSurfaceRegistry();
+        java.util.concurrent.atomic.AtomicBoolean failing = new java.util.concurrent.atomic.AtomicBoolean(false);
+        java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong(100L * 1_000_000_000L);
+        JwtAdmissionPolicy policy = JwtAdmissionPolicies.builder()
+                .jwksSupplier(() -> {
+                    if (failing.get()) {
+                        throw new IllegalStateException("JWKS endpoint unreachable");
+                    }
+                    return TestTokens.jwks(TestTokens.okpJwk("ed-1", ED));
+                })
+                .expectedIssuer(TestTokens.ISSUER)
+                .expectedAudience(TestTokens.AUDIENCE)
+                .jwksRefreshInterval(Duration.ofSeconds(60))
+                .jwksMinRefreshInterval(Duration.ofSeconds(10))
+                .jwksMaxStaleness(Duration.ofSeconds(120))
+                .clock(Clock.fixed(Instant.ofEpochSecond(TestTokens.NOW), ZoneOffset.UTC))
+                .nanoClock(nanos::get)
+                .build();
+        JwtValidationModule localModule = new JwtValidationModule(JwtServiceBoundaryBinding.of(sbc.requestFilterChain(), policy, Set.of()));
+        localModule.initialize();
+        localRegistry.registerRoute(ApiSurfaceRoute.builder()
+                .method(HttpMethod.GET)
+                .pathPattern("/profile")
+                .actionName("GET /profile")
+                .handler(ex -> ex.respond(HttpStatus.OK))
+                .build());
+
+        String authHeader = "Bearer " + TestTokens.eddsa("ed-1", ED.getPrivate(), TestTokens.validClaims());
+
+        // First request: valid, 200 OK
+        RecordingExchange ex1 = new RecordingExchange(HttpMethod.GET, "/profile", List.of(new HttpHeader("Authorization", authHeader)));
+        localRegistry.handle(ex1);
+        assertThat(ex1.status).isEqualTo(HttpStatus.OK);
+
+        // Fail subsequent fetches and advance past max staleness
+        failing.set(true);
+        nanos.addAndGet(Duration.ofSeconds(130).toNanos());
+
+        // Second request: past max staleness, answers 401 UNAUTHORIZED
+        RecordingExchange ex2 = new RecordingExchange(HttpMethod.GET, "/profile", List.of(new HttpHeader("Authorization", authHeader)));
+        localRegistry.handle(ex2);
+        assertThat(ex2.status).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test

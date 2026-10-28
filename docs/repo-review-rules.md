@@ -112,7 +112,8 @@ S8. **The decision path is transport-free; the one outbound call is the issuer's
     loopback host, no redirects). The whole fetch is bounded by one deadline that covers connecting,
     the headers and the body, and by a body size cap enforced while streaming. Refresh is
     single-flight in `JwksKeySet`, under a refresh interval and a minimum refetch interval that also
-    limits reloads an unknown `kid` triggers, and a failed fetch keeps the previous keys. A JWKS may
+    limits reloads an unknown `kid` triggers, and a failed fetch keeps the previous keys until the configured
+    maximum staleness is reached, after which every key is refused. A JWKS may
     equally arrive as a string or a `Supplier<String>`. The only inbound HTTP binding is the Service
     Boundary admission filter (`JwtAdmissionFilter`, attached through `AdmissionHostBinding`).
     Findings:

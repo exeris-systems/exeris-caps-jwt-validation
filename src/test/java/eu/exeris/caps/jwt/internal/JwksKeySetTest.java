@@ -94,4 +94,63 @@ class JwksKeySetTest {
         assertThat(keySet.find("k1")).isPresent();
         assertThat(fetches).as("retries wait for the minimum interval").hasValue(2);
     }
+
+    @Test
+    @DisplayName("a key set whose last successful load is older than the maximum staleness answers empty until the endpoint recovers")
+    void maxStalenessRefusesKeys() {
+        AtomicLong clock = new AtomicLong(0);
+        AtomicInteger fetches = new AtomicInteger();
+        AtomicReference<Boolean> failing = new AtomicReference<>(false);
+        Supplier<String> source = () -> {
+            fetches.incrementAndGet();
+            if (failing.get()) {
+                throw new IllegalStateException("endpoint down");
+            }
+            return TestTokens.jwks(TestTokens.okpJwk("k1", ED_1));
+        };
+        // refreshInterval = 300s, minRefresh = 30s, maxStaleness = 600s
+        JwksKeySet keySet = JwksKeySet.fromSource(source, 300 * SECOND, 30 * SECOND, 600 * SECOND, clock::get);
+        assertThat(keySet.find("k1")).isPresent();
+        assertThat(fetches).hasValue(1);
+
+        // Fail subsequent reloads
+        failing.set(true);
+
+        // 350s: stale (> 300s) but within max staleness (600s), previous keys kept
+        clock.set(350 * SECOND);
+        assertThat(keySet.find("k1")).isPresent();
+        assertThat(fetches).hasValue(2);
+
+        // 599s: still within max staleness
+        clock.set(599 * SECOND);
+        assertThat(keySet.find("k1")).isPresent();
+
+        // 600s: reaches max staleness limit -> answers empty
+        clock.set(600 * SECOND);
+        assertThat(keySet.find("k1")).isEmpty();
+
+        // 700s: still past limit -> answers empty
+        clock.set(700 * SECOND);
+        assertThat(keySet.find("k1")).isEmpty();
+
+        // Endpoint recovers at 800s -> fresh load restores keys
+        clock.set(800 * SECOND);
+        failing.set(false);
+        assertThat(keySet.find("k1")).isPresent();
+        assertThat(fetches.get()).isGreaterThan(2);
+    }
+
+    @Test
+    @DisplayName("fromSource requires maximum staleness greater than refresh interval")
+    void fromSourceValidatesMaxStaleness() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                JwksKeySet.fromSource(() -> "{}", 300 * SECOND, 30 * SECOND, 300 * SECOND, () -> 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("maximum staleness must be > the refresh interval");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                JwksKeySet.fromSource(() -> "{}", 300 * SECOND, 30 * SECOND, 200 * SECOND, () -> 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("maximum staleness must be > the refresh interval");
+    }
 }

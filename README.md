@@ -33,7 +33,7 @@ The capability fetches the issuer's JWKS itself; the verification decision reads
 - one deadline covers the whole fetch, connecting, headers and body (`jwks-timeout-millis`);
 - the body is capped at 64 KiB, enforced while it streams;
 - a refresh is single-flight: concurrent requests share one fetch. Keys are reloaded when older than `jwks-refresh-seconds`, and an unknown `kid` triggers a reload at most once per `jwks-min-refresh-seconds`;
-- a failed fetch keeps the previous keys.
+- a failed fetch keeps the previous keys until the last successful load is older than `jwks-max-staleness-seconds`, after which all keys are refused.
 
 Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `Supplier<String>`.
 
@@ -56,6 +56,7 @@ Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `
 | `exeris.caps.jwt.jwks-timeout-millis` | `2000` | deadline for the whole JWKS fetch |
 | `exeris.caps.jwt.jwks-refresh-seconds` | `300` | JWKS age that triggers a reload |
 | `exeris.caps.jwt.jwks-min-refresh-seconds` | `30` | minimum spacing of reloads, including unknown-`kid` reloads |
+| `exeris.caps.jwt.jwks-max-staleness-seconds` | `86400` | maximum seconds keys stay trusted after failed reloads; must be greater than `jwks-refresh-seconds` |
 | `exeris.caps.jwt.anonymous-routes` | none | comma-separated `METHOD /path/{template}` routes that admit a request without a token |
 
 ## Build & test
