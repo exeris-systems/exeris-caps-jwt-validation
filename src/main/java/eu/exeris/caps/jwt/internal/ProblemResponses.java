@@ -4,6 +4,12 @@ import eu.exeris.kernel.spi.http.HttpExchange;
 import eu.exeris.kernel.spi.http.HttpHeader;
 import eu.exeris.kernel.spi.http.HttpResponse;
 import eu.exeris.kernel.spi.http.HttpStatus;
+import eu.exeris.kernel.spi.http.HttpVersion;
+import eu.exeris.kernel.spi.context.KernelProviders;
+import eu.exeris.kernel.spi.memory.LoanedBuffer;
+
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -26,20 +32,44 @@ public final class ProblemResponses {
     /**
      * Answers the exchange with a problem response.
      *
+     * <p>The body is written into a buffer from the kernel allocator bound for the request. Until
+     * {@code respond} returns normally the buffer belongs to this method and is released on every
+     * other path; once {@code respond} has returned, the engine owns it and this method never touches
+     * it again. When no allocator is bound, the answer carries the same status and headers without a
+     * body.
+     *
      * @param exchange exchange to answer
      * @param status status
      * @param detail fixed detail text
      * @param headers additional headers
      */
     public static void send(HttpExchange exchange, HttpStatus status, String detail, List<HttpHeader> headers) {
-        String body = "{\"type\":\"about:blank\",\"title\":\"" + status.reasonPhrase()
-                + "\",\"status\":" + status.code() + ",\"detail\":\"" + detail + "\"}";
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        List<HttpHeader> all = new ArrayList<>(headers.size() + 3);
-        all.add(new HttpHeader("Content-Type", "application/problem+json"));
-        all.add(new HttpHeader("Content-Length", Integer.toString(bytes.length)));
+        HttpVersion version = exchange.request().version();
+        List<HttpHeader> all = new ArrayList<>(headers.size() + 2);
         all.add(new HttpHeader("Cache-Control", "no-store"));
         all.addAll(headers);
-        exchange.respond(new HttpResponse(status, exchange.request().version(), List.copyOf(all), new HeapLoanedBuffer(bytes)));
+        if (!KernelProviders.MEMORY_ALLOCATOR.isBound()) {
+            exchange.respond(HttpResponse.noBody(status, version, List.copyOf(all)));
+            return;
+        }
+        byte[] bytes = ("{\"type\":\"about:blank\",\"title\":\"" + status.reasonPhrase()
+                + "\",\"status\":" + status.code() + ",\"detail\":\"" + detail + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        all.add(0, new HttpHeader("Content-Type", "application/problem+json"));
+        LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocateNetwork(bytes.length);
+        boolean handedOver = false;
+        try {
+            if (buffer.capacity() < bytes.length) {
+                throw new IllegalStateException("allocator returned a buffer smaller than requested");
+            }
+            MemorySegment.copy(bytes, 0, buffer.segment(), ValueLayout.JAVA_BYTE, 0L, bytes.length);
+            buffer.setSize(bytes.length);
+            exchange.respond(new HttpResponse(status, version, List.copyOf(all), buffer));
+            handedOver = true;
+        } finally {
+            if (!handedOver) {
+                buffer.close();
+            }
+        }
     }
 }
