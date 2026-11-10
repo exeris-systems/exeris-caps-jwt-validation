@@ -387,8 +387,14 @@ class ProblemResponsesTest {
      */
     private static final double TOLERANCE_BYTES = 8.0;
 
-    /** The kernel's fixed cost per response plus this capability's headers, measured, with a modest margin. */
-    private static final double SHORT_BODY_BOUND_BYTES = 384.0;
+    /**
+     * The kernel's fixed cost per response plus the headers this overload builds per call: 264 to 320
+     * bytes measured, with a modest margin.
+     */
+    private static final double SHORT_BODY_BOUND_BYTES = 352.0;
+
+    /** The kernel's fixed cost per response with shared headers: 176 bytes measured, with a modest margin. */
+    private static final double SHARED_HEADERS_BOUND_BYTES = 208.0;
 
     private static volatile byte[] sink;
 
@@ -440,6 +446,28 @@ class ProblemResponsesTest {
                     .isLessThanOrEqualTo(TOLERANCE_BYTES)
                     .isLessThan((LONG_DETAIL.length() - SHORT_DETAIL.length()) / 100.0);
             assertThat(shortBytes).as("fixed cost per response").isLessThan(SHORT_BODY_BOUND_BYTES);
+        } finally {
+            allocator.close();
+        }
+    }
+
+    @Test
+    @DisplayName("with shared headers the fixed heap cost per response stays within the measured bound, whatever the body length")
+    void heapPerResponseWithSharedHeaders() {
+        MemoryAllocator allocator = ServiceLoader.load(MemoryProvider.class).findFirst().orElseThrow()
+                .createAllocator(MemoryProviderConfig.defaults());
+        try {
+            HttpExchange releasing = releasingExchange();
+            ProblemResponses.Headers shared = ProblemResponses.Headers.of(CHALLENGE);
+            double shortBytes = steadyBytesPerCall(allocator,
+                    () -> ProblemResponses.send(releasing, HttpStatus.UNAUTHORIZED, SHORT_DETAIL, shared));
+            double longBytes = steadyBytesPerCall(allocator,
+                    () -> ProblemResponses.send(releasing, HttpStatus.UNAUTHORIZED, LONG_DETAIL, shared));
+            System.out.println("shared-headers heap bytes per response: short=" + shortBytes + " long=" + longBytes);
+
+            assertThat(Math.abs(longBytes - shortBytes)).as("long %s vs short %s", longBytes, shortBytes)
+                    .isLessThanOrEqualTo(TOLERANCE_BYTES);
+            assertThat(shortBytes).as("fixed cost per response").isLessThan(SHARED_HEADERS_BOUND_BYTES);
         } finally {
             allocator.close();
         }
