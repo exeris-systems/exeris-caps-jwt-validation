@@ -27,20 +27,21 @@ No verification result is cached: every request verifies its token's signature.
 
 ## JWKS fetch
 
-The capability fetches the issuer's JWKS itself. The verification decision works on the keys `JwksKeySet` holds, with an intentional bounded synchronous fetch on a miss (on first use, when the document is older than `jwks-refresh-seconds`, and on an unknown `kid` at most once per `jwks-min-refresh-seconds`). Waiters on the refresh lock are bounded by the fetch deadline (`jwks-timeout-millis`) and fail closed. The fetch is bounded:
+The capability fetches the issuer's JWKS itself; the verification decision reads no network. The fetch is bounded:
 
 - it goes only to the configured `exeris.caps.jwt.jwks-uri`, over HTTPS or, on a loopback host, HTTP, and follows no redirect;
 - one deadline covers the whole fetch, connecting, headers and body (`jwks-timeout-millis`);
-- waiters on the refresh lock are bounded by the fetch deadline (`jwks-timeout-millis`) and fail closed on timeout;
 - the body is capped at 64 KiB, enforced while it streams;
-- a refresh is single-flight: concurrent requests share one fetch. Keys are reloaded when older than `jwks-refresh-seconds`, and an unknown `kid` triggers a reload at most once per `jwks-min-refresh-seconds`;
-- a failed fetch keeps the previous keys until the last successful load is older than `jwks-max-staleness-seconds`, after which all keys are refused.
+- one background refresher, started when the policy is built, makes every fetch. `build()` waits up to `jwks-timeout-millis` for the first load, and until a load succeeds every token is refused;
+- keys are reloaded every `jwks-refresh-seconds`; an unknown `kid` asks for an early reload, at most once per `jwks-min-refresh-seconds`, and the request that carried it is answered from the keys held (`UNKNOWN_KEY`);
+- a failed fetch keeps the previous keys, retried every `jwks-min-refresh-seconds`, until the last successful load is older than `jwks-max-staleness-seconds`; then every key is refused;
+- `JwtValidationModule(binding, policy)` stops the refresher at `terminate()`.
 
 Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `Supplier<String>`.
 
 ## Service Boundary filter
 
-`JwtServiceBoundaryBinding.of(chain, policy, anonymousRoutes)` builds the binding, and `new JwtValidationModule(binding)` attaches it at `initialize()`. The filter runs in the `AUTHENTICATION` phase. On a verified token it records a `JwtPrincipal` — subject, tenant, session id, roles and scopes, all UUID-typed where the kernel's `PrincipalContext` asks for it — through `AdmissionContext`, together with the token's `sid` claim when present, and the route handler reads them from `RequestContext.current().principal()` and `RequestContext.current().sessionId()`. That is the only source of the caller's identity a route may use. On any failure the filter answers `401` with `WWW-Authenticate: Bearer` and a fixed `application/problem+json` body that names nothing about the token. A route listed as anonymous admits a request without a token; a token that is present is verified on every route. A module with no binding refuses to initialise.
+`JwtServiceBoundaryBinding.of(chain, policy, anonymousRoutes)` builds the binding, and `new JwtValidationModule(binding)` attaches it at `initialize()`; `new JwtValidationModule(binding, policy)` also closes the policy, and so stops its JWKS refresher, at `terminate()`. The filter runs in the `AUTHENTICATION` phase. On a verified token it records a `JwtPrincipal` — subject, tenant, session id, roles and scopes, all UUID-typed where the kernel's `PrincipalContext` asks for it — through `AdmissionContext`, together with the token's `sid` claim when present, and the route handler reads them from `RequestContext.current().principal()` and `RequestContext.current().sessionId()`. That is the only source of the caller's identity a route may use. On any failure the filter answers `401` with `WWW-Authenticate: Bearer` and a fixed `application/problem+json` body that names nothing about the token. A route listed as anonymous admits a request without a token; a token that is present is verified on every route. A module with no binding refuses to initialise.
 
 ## Configuration
 
@@ -57,7 +58,7 @@ Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `
 | `exeris.caps.jwt.jwks-timeout-millis` | `2000` | deadline for the whole JWKS fetch |
 | `exeris.caps.jwt.jwks-refresh-seconds` | `300` | JWKS age that triggers a reload |
 | `exeris.caps.jwt.jwks-min-refresh-seconds` | `30` | minimum spacing of reloads, including unknown-`kid` reloads |
-| `exeris.caps.jwt.jwks-max-staleness-seconds` | `86400` | maximum seconds keys stay trusted after failed reloads; must be greater than `jwks-refresh-seconds` |
+| `exeris.caps.jwt.jwks-max-staleness-seconds` | `max(86400, 2 × jwks-refresh-seconds)` | maximum seconds keys stay trusted after the last successful load; 1 to 604800, and greater than `jwks-refresh-seconds` |
 | `exeris.caps.jwt.anonymous-routes` | none | comma-separated `METHOD /path/{template}` routes that admit a request without a token |
 
 ## Build & test

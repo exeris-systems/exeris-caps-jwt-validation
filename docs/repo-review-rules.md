@@ -106,26 +106,21 @@ S7. **Verification names what ran.** CI runs `mvn verify` on JDK 25 and 26 on ev
 
 S8. **The decision path is transport-free; the one outbound call is the issuer's JWKS.**
     `JwtAdmissionPolicy` takes a compact JWS and returns a `JwtValidationResult`, and the verification
-    decision in `DefaultJwtAdmissionPolicy` works on the keys `JwksKeySet` holds, with an intentional
-    bounded synchronous fetch on a miss (on first use, when the document is older than the refresh
-    interval, and on an unknown `kid` subject to the minimum refetch interval). Waiters on the refresh
-    lock are bounded by the fetch deadline and fail closed. The capability may fetch the issuer's
-    JWKS itself, through `HttpJwksFetcher` only, as an outbound HTTPS GET of the configured
-    `jwks-uri` (HTTP only on a loopback host, no redirects). The whole fetch is bounded by one
-    deadline that covers connecting, the headers and the body, and by a body size cap enforced while
-    streaming. Refresh is single-flight in `JwksKeySet`, under a refresh interval and a minimum
-    refetch interval that also limits reloads an unknown `kid` triggers, and a failed fetch keeps the
-    previous keys until the configured maximum staleness is reached, after which every key is refused.
-    A JWKS may equally arrive as a string or a `Supplier<String>`. The only inbound HTTP binding is
-    the Service Boundary admission filter (`JwtAdmissionFilter`, attached through
-    `AdmissionHostBinding`).
+    decision in `DefaultJwtAdmissionPolicy` reads no network or file: it works on
+    the keys `JwksKeySet` holds. The capability may fetch the issuer's JWKS itself, through
+    `HttpJwksFetcher` only, as an outbound HTTPS GET of the configured `jwks-uri` (HTTP only on a
+    loopback host, no redirects). The whole fetch is bounded by one deadline that covers connecting,
+    the headers and the body, and by a body size cap enforced while streaming. Refresh is
+    single-flight in `JwksKeySet`, under a refresh interval and a minimum refetch interval that also
+    limits reloads an unknown `kid` triggers, and a failed fetch keeps the previous keys. A JWKS may
+    equally arrive as a string or a `Supplier<String>`. The only inbound HTTP binding is the Service
+    Boundary admission filter (`JwtAdmissionFilter`, attached through `AdmissionHostBinding`).
     Findings:
     - a fetch with no deadline over the whole exchange, with no body size cap, over plain HTTP off
       loopback, following redirects, or run outside `HttpJwksFetcher` → `[HARD BLOCK]`;
-    - a refresh that is not single-flight, has no minimum refetch interval, or leaves lock waiters
-      unbounded → `[HARD BLOCK]`;
-    - any other outbound call, a fetch outside the bounded miss path in `JwksKeySet`, an inbound HTTP
-      server or listener, or an HTTP-client or file-fetch call in `api` → `[HARD BLOCK]`.
+    - a refresh that is not single-flight, or has no minimum refetch interval → `[HARD BLOCK]`;
+    - any other outbound call, a fetch from the verification decision path, an inbound HTTP server or
+      listener, or an HTTP-client or file-fetch call in `api` → `[HARD BLOCK]`.
     ADR-099 obligation 8 requires EdDSA verification against a JWKS document; it does not say who
     retrieves the document, and this rule judges code against the bounds above.
 

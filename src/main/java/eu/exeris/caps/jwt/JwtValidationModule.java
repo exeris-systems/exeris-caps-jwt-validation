@@ -31,6 +31,7 @@ import java.time.Duration;
 public final class JwtValidationModule implements CapabilityLifecycleHooks {
 
     private final AdmissionHostBinding binding;
+    private final JwtAdmissionPolicy ownedPolicy;
 
     /**
      * Reflective constructor of the composition runtime. It binds no host, so {@link #initialize()} refuses;
@@ -46,7 +47,20 @@ public final class JwtValidationModule implements CapabilityLifecycleHooks {
      * @param binding where the token check is installed; null leaves the module unable to initialise
      */
     public JwtValidationModule(AdmissionHostBinding binding) {
+        this(binding, null);
+    }
+
+    /**
+     * Creates a module that installs its check through {@code binding} and owns {@code policy}'s background
+     * work: when the policy is {@link AutoCloseable}, {@link #terminate()} closes it after the check is
+     * detached. The one-argument constructor leaves the policy to its caller.
+     *
+     * @param binding where the token check is installed; null leaves the module unable to initialise
+     * @param policy the policy the binding installs; may be null
+     */
+    public JwtValidationModule(AdmissionHostBinding binding, JwtAdmissionPolicy policy) {
         this.binding = binding;
+        this.ownedPolicy = policy;
     }
 
     @Override
@@ -61,18 +75,30 @@ public final class JwtValidationModule implements CapabilityLifecycleHooks {
 
     @Override
     public void ready() {
-        // The check is live from initialize(); nothing further to do.
+        // The check is live from initialize(); the policy's refresher starts when the policy is built.
     }
 
     @Override
     public void drain(Duration remaining) {
-        // Requests still in flight are verified until terminate() detaches the check.
+        // Requests still in flight are verified until terminate() detaches the check, so the refresher
+        // keeps running until then.
     }
 
     @Override
     public void terminate() {
-        if (binding != null) {
-            binding.detach();
+        try {
+            if (binding != null) {
+                binding.detach();
+            }
+        } finally {
+            if (ownedPolicy instanceof AutoCloseable closeable) {
+                try {
+                    closeable.close();
+                } catch (Exception e) {
+                    System.getLogger(JwtValidationModule.class.getName())
+                            .log(System.Logger.Level.WARNING, "Closing the JWT admission policy failed", e);
+                }
+            }
         }
     }
 }

@@ -210,6 +210,52 @@ class JwtServiceBoundaryFilterTest {
         RecordingExchange ex2 = new RecordingExchange(HttpMethod.GET, "/profile", List.of(new HttpHeader("Authorization", authHeader)));
         localRegistry.handle(ex2);
         assertThat(ex2.status).isEqualTo(HttpStatus.UNAUTHORIZED);
+        localModule.terminate();
+    }
+
+    @Test
+    @DisplayName("terminate closes a policy the module owns, and never one it does not")
+    void terminateClosesAnOwnedPolicy() {
+        java.util.concurrent.atomic.AtomicInteger closed = new java.util.concurrent.atomic.AtomicInteger();
+        class ClosablePolicy implements JwtAdmissionPolicy, AutoCloseable {
+            @Override
+            public eu.exeris.caps.jwt.api.JwtValidationResult validate(CharSequence authorizationHeader) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public eu.exeris.caps.jwt.api.JwtValidationResult validateToken(CharSequence rawToken) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public void close() {
+                closed.incrementAndGet();
+            }
+        }
+        ClosablePolicy policy = new ClosablePolicy();
+        eu.exeris.caps.jwt.api.AdmissionHostBinding noHost = new eu.exeris.caps.jwt.api.AdmissionHostBinding() {
+            @Override
+            public String host() {
+                return "test";
+            }
+
+            @Override
+            public void attach() {
+            }
+
+            @Override
+            public void detach() {
+            }
+        };
+
+        new JwtValidationModule(noHost).terminate();
+        assertThat(closed).hasValue(0);
+
+        JwtValidationModule owner = new JwtValidationModule(noHost, policy);
+        owner.terminate();
+        owner.terminate();
+        assertThat(closed.get()).isGreaterThanOrEqualTo(1);
     }
 
     @Test
