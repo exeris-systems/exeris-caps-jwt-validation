@@ -378,6 +378,91 @@ class ProblemResponsesTest {
         }
     }
 
+    private static final String SHORT_DETAIL = "The request lacks valid bearer credentials, so access is refused.";
+    private static final String LONG_DETAIL = "The request lacks valid bearer credentials. ".repeat(90);
+
+    /**
+     * Allowed difference between the per-response heap figures of the two bodies: far below the
+     * difference in body length, above the measurement noise once the path is warm.
+     */
+    private static final double TOLERANCE_BYTES = 8.0;
+
+    /** The kernel's fixed cost per response plus this capability's headers, measured, with a modest margin. */
+    private static final double SHORT_BODY_BOUND_BYTES = 384.0;
+
+    private static volatile byte[] sink;
+
+    private static Runnable productionSend(HttpExchange exchange, String detail) {
+        return () -> ProblemResponses.send(exchange, HttpStatus.UNAUTHORIZED, detail, CHALLENGE);
+    }
+
+    private static HttpExchange releasingExchange() {
+        var request = HttpRequest.noBody(HttpMethod.GET, "/me", HttpVersion.HTTP_1_1, List.of());
+        return new HttpExchange() {
+            @Override
+            public HttpRequest request() {
+                return request;
+            }
+
+            @Override
+            public void respond(HttpResponse response) {
+                response.body().close();
+            }
+        };
+    }
+
+    /** Median over several rounds, each after a warm-up that also fills the body cache. */
+    private static double steadyBytesPerCall(MemoryAllocator allocator, Runnable call) {
+        for (int i = 0; i < 300_000; i++) {
+            KernelAllocators.bound(allocator, call);
+        }
+        double[] runs = new double[5];
+        for (int i = 0; i < runs.length; i++) {
+            runs[i] = bytesPerCall(allocator, call);
+        }
+        java.util.Arrays.sort(runs);
+        return runs[runs.length / 2];
+    }
+
+    @Test
+    @DisplayName("heap bytes per response do not depend on the body length")
+    void heapPerResponseIsIndependentOfBodyLength() {
+        MemoryAllocator allocator = ServiceLoader.load(MemoryProvider.class).findFirst().orElseThrow()
+                .createAllocator(MemoryProviderConfig.defaults());
+        try {
+            HttpExchange releasing = releasingExchange();
+            double shortBytes = steadyBytesPerCall(allocator, productionSend(releasing, SHORT_DETAIL));
+            double longBytes = steadyBytesPerCall(allocator, productionSend(releasing, LONG_DETAIL));
+            System.out.println("heap bytes per response: short=" + shortBytes + " long=" + longBytes
+                    + " (detail lengths " + SHORT_DETAIL.length() + " / " + LONG_DETAIL.length() + ")");
+
+            assertThat(Math.abs(longBytes - shortBytes)).as("long %s vs short %s", longBytes, shortBytes)
+                    .isLessThanOrEqualTo(TOLERANCE_BYTES)
+                    .isLessThan((LONG_DETAIL.length() - SHORT_DETAIL.length()) / 100.0);
+            assertThat(shortBytes).as("fixed cost per response").isLessThan(SHORT_BODY_BOUND_BYTES);
+        } finally {
+            allocator.close();
+        }
+    }
+
+    @Test
+    @DisplayName("the measurement discriminates: a body-sized heap array per response breaks the same assertion")
+    void controlAllocatesAndIsDetected() {
+        MemoryAllocator allocator = ServiceLoader.load(MemoryProvider.class).findFirst().orElseThrow()
+                .createAllocator(MemoryProviderConfig.defaults());
+        try {
+            double shortBytes = steadyBytesPerCall(allocator,
+                    () -> sink = SHORT_DETAIL.getBytes(StandardCharsets.UTF_8).clone());
+            double longBytes = steadyBytesPerCall(allocator,
+                    () -> sink = LONG_DETAIL.getBytes(StandardCharsets.UTF_8).clone());
+            System.out.println("control heap bytes per response: short=" + shortBytes + " long=" + longBytes);
+
+            assertThat(Math.abs(longBytes - shortBytes)).isGreaterThan(TOLERANCE_BYTES);
+        } finally {
+            allocator.close();
+        }
+    }
+
     /** Smallest per-call allocation on this thread over several rounds, after warm-up. */
     private static double bytesPerCall(MemoryAllocator allocator, Runnable call) {
         var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
