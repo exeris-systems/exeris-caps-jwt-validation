@@ -357,7 +357,6 @@ class JwksKeySetTest {
     @Test
     @DisplayName("a lookup allocates no more than its Optional, and an unknown kid with a reload already requested allocates nothing")
     void findAllocatesNoMoreThanTheOptional() {
-        var bean = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
         AtomicLong clock = new AtomicLong(0);
         JwksKeySet keySet = begin(JwksKeySet.fromSource(JwksKeySetTest::one, 300 * SECOND, 30 * SECOND,
                 600 * SECOND, clock::get));
@@ -365,21 +364,14 @@ class JwksKeySetTest {
             keySet.find("k1");
             keySet.find("unknown");
         }
-        long id = Thread.currentThread().threadId();
-
-        long before = bean.getThreadAllocatedBytes(id);
-        for (int i = 0; i < 10_000; i++) {
-            keySet.find("unknown");
-        }
-        long unknown = bean.getThreadAllocatedBytes(id) - before;
-        before = bean.getThreadAllocatedBytes(id);
-        for (int i = 0; i < 10_000; i++) {
-            keySet.find("k1");
-        }
-        long known = bean.getThreadAllocatedBytes(id) - before;
+        int ops = 10_000;
+        double[] perOp = HeapMeter.interleavedMinima(0, ops, 5,
+                () -> keySet.find("unknown"), () -> keySet.find("k1"));
+        double unknown = perOp[0] * ops;
+        double known = perOp[1] * ops;
 
         assertThat(unknown).isLessThan(1024);
-        assertThat(known).isLessThanOrEqualTo(16L * 10_000);
+        assertThat(known).isLessThanOrEqualTo(16.0 * 10_000);
     }
 
     @Test
