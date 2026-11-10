@@ -18,27 +18,7 @@ tracking issue in the `0.1.0` milestone. An item under "Later" does not block it
 
 ## Before 0.1.0
 
-### Maximum staleness of the JWKS keys
-
-Tracked in [#10](https://github.com/exeris-systems/exeris-caps-jwt-validation/issues/10).
-
-A failed reload keeps the previous keys, and nothing bounds how long the keys may stay in force. While
-the issuer's JWKS endpoint is down, a key the issuer has withdrawn keeps verifying tokens, so a "valid"
-outcome can rest on a key set of unbounded age. The capability should refuse every key once the last
-successful load is older than a configured maximum. The code is `JwksKeySet.find` and
-`JwksKeySet.refresh` in `src/main/java/eu/exeris/caps/jwt/internal/JwksKeySet.java`.
-
-### The verification decision reaches the network
-
-Tracked in [#11](https://github.com/exeris-systems/exeris-caps-jwt-validation/issues/11).
-
-`DefaultJwtAdmissionPolicy.validateToken` calls `JwksKeySet.find`, which fetches the JWKS on the request
-thread on first use, on a stale document and on an unknown `kid`, and other callers wait on the refresh
-lock for up to the fetch deadline. The README and rule S8 in `docs/repo-review-rules.md` say the
-decision reads no network. Either the fetch moves off the request thread, or the documents state the
-bounded synchronous fetch as the design and the lock wait is bounded. The code is
-`src/main/java/eu/exeris/caps/jwt/internal/JwksKeySet.java` and
-`src/main/java/eu/exeris/caps/jwt/internal/DefaultJwtAdmissionPolicy.java`.
+None — all items blocking 0.1.0 are closed.
 
 ## Later
 
@@ -79,6 +59,6 @@ rule; the code is `src/main/java/eu/exeris/caps/jwt/api/JwtPrincipal.java` and
 ### Release workflow and API baseline
 
 No artefact is published: `.github/workflows/` holds the build and the guardrail gates and no release
-job, and the capability builds against `exeris-kernel` 0.13.0-SNAPSHOT. The repository has no API golden
-or accepted-changes register, because no released version exists to take a baseline from. A release
-job and the first baseline wait on a released kernel 0.13.0 and on the 0.1.0 items above.
+job. The capability builds against the released `exeris-kernel` 0.13.1. The repository has no API golden
+or accepted-changes register, because no released version of it exists to take a baseline from. A release
+job and the first baseline wait on a publication target for the capability's own artefact.

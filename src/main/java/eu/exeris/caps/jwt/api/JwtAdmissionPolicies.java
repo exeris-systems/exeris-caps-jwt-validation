@@ -49,12 +49,15 @@ public final class JwtAdmissionPolicies {
     public static final String KEY_JWKS_REFRESH_SECONDS = "exeris.caps.jwt.jwks-refresh-seconds";
     /** Minimum seconds between JWKS reloads, including those an unknown {@code kid} triggers; default 30. */
     public static final String KEY_JWKS_MIN_REFRESH_SECONDS = "exeris.caps.jwt.jwks-min-refresh-seconds";
+    /** Maximum seconds keys stay trusted after the last successful load; default max(86400, 2 x jwks-refresh-seconds); 1..604800. */
+    public static final String KEY_JWKS_MAX_STALENESS_SECONDS = "exeris.caps.jwt.jwks-max-staleness-seconds";
 
     /** Default name of the tenant claim. */
     public static final String DEFAULT_TENANT_CLAIM = "tid";
 
     private static final Duration MAX_CLOCK_SKEW = Duration.ofMinutes(5);
     private static final Duration MAX_JWKS_INTERVAL = Duration.ofDays(1);
+    private static final Duration MAX_JWKS_STALENESS = Duration.ofDays(7);
     private static final Set<String> SUPPORTED_ALGORITHMS = Set.of("EdDSA", "RS256");
 
     private JwtAdmissionPolicies() {
@@ -89,6 +92,10 @@ public final class JwtAdmissionPolicies {
                 .jwksTimeout(Duration.ofMillis(longValue(properties, KEY_JWKS_TIMEOUT_MILLIS, 2000)))
                 .jwksRefreshInterval(Duration.ofSeconds(longValue(properties, KEY_JWKS_REFRESH_SECONDS, 300)))
                 .jwksMinRefreshInterval(Duration.ofSeconds(longValue(properties, KEY_JWKS_MIN_REFRESH_SECONDS, 30)));
+        Long staleness = optionalLong(properties, KEY_JWKS_MAX_STALENESS_SECONDS);
+        if (staleness != null) {
+            builder.jwksMaxStaleness(Duration.ofSeconds(staleness));
+        }
         String algorithms = properties.get(KEY_ALGORITHMS);
         if (algorithms != null) {
             Set<String> accepted = new LinkedHashSet<>();
@@ -108,6 +115,14 @@ public final class JwtAdmissionPolicies {
         return builder.build();
     }
 
+    private static Long optionalLong(Map<String, String> properties, String key) {
+        String value = properties.get(key);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return longValue(properties, key, 0);
+    }
+
     private static long longValue(Map<String, String> properties, String key, long fallback) {
         String value = properties.get(key);
         if (value == null || value.isBlank()) {
@@ -120,10 +135,10 @@ public final class JwtAdmissionPolicies {
         }
     }
 
-    private static void requireWithinBounds(Duration value, String key, String unit, long millisPerUnit) {
-        if (value.isNegative() || value.isZero() || value.compareTo(MAX_JWKS_INTERVAL) > 0) {
+    private static void requireWithinBounds(Duration value, Duration max, String key, String unit, long millisPerUnit) {
+        if (value.isNegative() || value.isZero() || value.compareTo(max) > 0) {
             throw new IllegalStateException(key + " must be between 1 and "
-                    + MAX_JWKS_INTERVAL.toMillis() / millisPerUnit + " " + unit);
+                    + max.toMillis() / millisPerUnit + " " + unit);
         }
     }
 
@@ -143,6 +158,7 @@ public final class JwtAdmissionPolicies {
         private Duration jwksTimeout = Duration.ofSeconds(2);
         private Duration jwksRefreshInterval = Duration.ofMinutes(5);
         private Duration jwksMinRefreshInterval = Duration.ofSeconds(30);
+        private Duration jwksMaxStaleness;
         private Clock clock = Clock.systemUTC();
         private LongSupplier nanoClock = System::nanoTime;
 
@@ -224,6 +240,15 @@ public final class JwtAdmissionPolicies {
             return this;
         }
 
+        /**
+         * Maximum time keys stay trusted after the last successful load; 1 s to 7 days and greater than
+         * the refresh interval. Default {@code max(1 day, 2 x refresh interval)}.
+         */
+        public Builder jwksMaxStaleness(Duration maxStaleness) {
+            this.jwksMaxStaleness = Objects.requireNonNull(maxStaleness, "maxStaleness");
+            return this;
+        }
+
         /** Wall clock for {@code exp}, {@code nbf} and {@code iat}. */
         public Builder clock(Clock clock) {
             this.clock = Objects.requireNonNull(clock, "clock");
@@ -236,6 +261,14 @@ public final class JwtAdmissionPolicies {
             return this;
         }
 
+        /**
+         * Builds the policy. A policy backed by a JWKS URI or supplier starts one background refresher and
+         * waits up to the JWKS timeout for its first load attempt; until a load succeeds every token is
+         * refused. The policy is {@link AutoCloseable}: closing it stops the refresher.
+         *
+         * @return the policy
+         * @throws IllegalStateException if the configuration is incomplete or outside its bounds
+         */
         public JwtAdmissionPolicy build() {
             int sources = (jwksUri != null ? 1 : 0) + (jwksSupplier != null ? 1 : 0)
                     + (staticJwks != null ? 1 : 0) + (fixedKeys.isEmpty() ? 0 : 1);
@@ -251,12 +284,19 @@ public final class JwtAdmissionPolicies {
             if (clockSkew.isNegative() || clockSkew.compareTo(MAX_CLOCK_SKEW) > 0) {
                 throw new IllegalStateException("Clock skew must be between 0 and " + MAX_CLOCK_SKEW.toSeconds() + " seconds");
             }
-            requireWithinBounds(jwksTimeout, KEY_JWKS_TIMEOUT_MILLIS, "milliseconds", 1);
-            requireWithinBounds(jwksRefreshInterval, KEY_JWKS_REFRESH_SECONDS, "seconds", 1000);
-            requireWithinBounds(jwksMinRefreshInterval, KEY_JWKS_MIN_REFRESH_SECONDS, "seconds", 1000);
+            requireWithinBounds(jwksTimeout, MAX_JWKS_INTERVAL, KEY_JWKS_TIMEOUT_MILLIS, "milliseconds", 1);
+            requireWithinBounds(jwksRefreshInterval, MAX_JWKS_INTERVAL, KEY_JWKS_REFRESH_SECONDS, "seconds", 1000);
+            requireWithinBounds(jwksMinRefreshInterval, MAX_JWKS_INTERVAL, KEY_JWKS_MIN_REFRESH_SECONDS, "seconds", 1000);
+            Duration staleness = jwksMaxStaleness != null ? jwksMaxStaleness
+                    : Duration.ofNanos(JwksKeySet.defaultMaxStalenessNanos(jwksRefreshInterval.toNanos()));
+            requireWithinBounds(staleness, MAX_JWKS_STALENESS, KEY_JWKS_MAX_STALENESS_SECONDS, "seconds", 1000);
             if (jwksRefreshInterval.compareTo(jwksMinRefreshInterval) < 0) {
                 throw new IllegalStateException(KEY_JWKS_REFRESH_SECONDS + " must not be smaller than "
                         + KEY_JWKS_MIN_REFRESH_SECONDS);
+            }
+            if (staleness.compareTo(jwksRefreshInterval) <= 0) {
+                throw new IllegalStateException(KEY_JWKS_MAX_STALENESS_SECONDS + " must be greater than "
+                        + KEY_JWKS_REFRESH_SECONDS);
             }
             if (acceptedAlgorithms.isEmpty() || !SUPPORTED_ALGORITHMS.containsAll(acceptedAlgorithms)) {
                 throw new IllegalStateException("Accepted algorithms must be a non-empty subset of " + SUPPORTED_ALGORITHMS);
@@ -277,7 +317,8 @@ public final class JwtAdmissionPolicies {
             } else {
                 Supplier<String> source = jwksSupplier != null ? jwksSupplier : new HttpJwksFetcher(jwksUri, jwksTimeout);
                 keySet = JwksKeySet.fromSource(source, jwksRefreshInterval.toNanos(),
-                        jwksMinRefreshInterval.toNanos(), nanoClock);
+                        jwksMinRefreshInterval.toNanos(), staleness.toNanos(), nanoClock);
+                keySet.start(jwksTimeout.toNanos());
             }
             return new DefaultJwtAdmissionPolicy(keySet, acceptedAlgorithms, expectedIssuer.strip(),
                     expectedAudience.strip(), clockSkew.toSeconds(), tenantClaim, clock);

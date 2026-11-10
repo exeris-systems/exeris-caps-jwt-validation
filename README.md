@@ -2,7 +2,7 @@
 
 JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, fetched by the capability itself from the configured `jwks-uri` within the bounds in [JWKS fetch](#jwks-fetch), and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It binds inbound only through the Service Boundary admission filter and owns no other inbound transport.
 
-Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API is not stable and no artefact has been published.
+Status: proof of concept, built against `exeris-kernel` 0.13.1. The API is not stable and no artefact has been published.
 
 ## Where it sits
 
@@ -32,14 +32,16 @@ The capability fetches the issuer's JWKS itself; the verification decision reads
 - it goes only to the configured `exeris.caps.jwt.jwks-uri`, over HTTPS or, on a loopback host, HTTP, and follows no redirect;
 - one deadline covers the whole fetch, connecting, headers and body (`jwks-timeout-millis`);
 - the body is capped at 64 KiB, enforced while it streams;
-- a refresh is single-flight: concurrent requests share one fetch. Keys are reloaded when older than `jwks-refresh-seconds`, and an unknown `kid` triggers a reload at most once per `jwks-min-refresh-seconds`;
-- a failed fetch keeps the previous keys.
+- one background refresher, started when the policy is built, makes every fetch. `build()` waits up to `jwks-timeout-millis` for the first load, and until a load succeeds every token is refused;
+- keys are reloaded every `jwks-refresh-seconds`; an unknown `kid` asks for an early reload, at most once per `jwks-min-refresh-seconds`, and the request that carried it is answered from the keys held (`UNKNOWN_KEY`);
+- a failed fetch keeps the previous keys, retried every `jwks-min-refresh-seconds`, until the last successful load is older than `jwks-max-staleness-seconds`; then every key is refused;
+- `JwtValidationModule(binding, policy)` stops the refresher at `terminate()`.
 
 Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `Supplier<String>`.
 
 ## Service Boundary filter
 
-`JwtServiceBoundaryBinding.of(chain, policy, anonymousRoutes)` builds the binding, and `new JwtValidationModule(binding)` attaches it at `initialize()`. The filter runs in the `AUTHENTICATION` phase. On a verified token it records a `JwtPrincipal` — subject, tenant, session id, roles and scopes, all UUID-typed where the kernel's `PrincipalContext` asks for it — through `AdmissionContext`, together with the token's `sid` claim when present, and the route handler reads them from `RequestContext.current().principal()` and `RequestContext.current().sessionId()`. That is the only source of the caller's identity a route may use. On any failure the filter answers `401` with `WWW-Authenticate: Bearer` and a fixed `application/problem+json` body that names nothing about the token. A route listed as anonymous admits a request without a token; a token that is present is verified on every route. A module with no binding refuses to initialise.
+`JwtServiceBoundaryBinding.of(chain, policy, anonymousRoutes)` builds the binding, and `new JwtValidationModule(binding)` attaches it at `initialize()`; `new JwtValidationModule(binding, policy)` also closes the policy, and so stops its JWKS refresher, at `terminate()`. The filter runs in the `AUTHENTICATION` phase. On a verified token it records a `JwtPrincipal` — subject, tenant, session id, roles and scopes, all UUID-typed where the kernel's `PrincipalContext` asks for it — through `AdmissionContext`, together with the token's `sid` claim when present, and the route handler reads them from `RequestContext.current().principal()` and `RequestContext.current().sessionId()`. That is the only source of the caller's identity a route may use. On any failure the filter answers `401` with `WWW-Authenticate: Bearer` and a fixed `application/problem+json` body that names nothing about the token. A route listed as anonymous admits a request without a token; a token that is present is verified on every route. A module with no binding refuses to initialise.
 
 ## Configuration
 
@@ -56,6 +58,7 @@ Without a `jwks-uri` the policy uses a JWKS document supplied as a string or a `
 | `exeris.caps.jwt.jwks-timeout-millis` | `2000` | deadline for the whole JWKS fetch |
 | `exeris.caps.jwt.jwks-refresh-seconds` | `300` | JWKS age that triggers a reload |
 | `exeris.caps.jwt.jwks-min-refresh-seconds` | `30` | minimum spacing of reloads, including unknown-`kid` reloads |
+| `exeris.caps.jwt.jwks-max-staleness-seconds` | `max(86400, 2 × jwks-refresh-seconds)` | maximum seconds keys stay trusted after the last successful load; 1 to 604800, and greater than `jwks-refresh-seconds` |
 | `exeris.caps.jwt.anonymous-routes` | none | comma-separated `METHOD /path/{template}` routes that admit a request without a token |
 
 ## Build & test
@@ -69,7 +72,7 @@ mvn verify                               # pass 2 — generate cap-manifest.json
 
 Both passes are needed after a `clean`: `exeris:generate` runs before `compile`, and `compile` is when the processor writes the metadata it reads. `src/main/generated/java/cap-manifest.json` is committed, so a clean `git status` after `mvn verify` shows the manifest matches the declaration.
 
-`exeris-tooling` 0.10.0 and `exeris-sdk` 0.12.0 resolve from Maven Central, `exeris-caps-service-boundary-core` is built from its `main` branch, and `exeris-kernel` 0.13.0-SNAPSHOT is resolved from GitHub Packages, which needs a token with `read:packages`. [`.github/workflows/build.yml`](.github/workflows/build.yml) is the exact sequence, and [`.github/maven-settings.xml`](.github/maven-settings.xml) the repository configuration it uses.
+`exeris-kernel` 0.13.1, `exeris-sdk` 0.13.3 and `exeris-tooling` 0.11.0 resolve from Maven Central and need no token; `exeris-caps-service-boundary-core` is built from its `main` branch first. [`.github/workflows/build.yml`](.github/workflows/build.yml) is the exact sequence.
 
 ## Documentation
 

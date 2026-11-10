@@ -35,7 +35,7 @@ import java.util.Set;
  *
  * @since 0.1.0
  */
-public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy {
+public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy, AutoCloseable {
 
     /** Upper bound on a compact token's length; anything longer is refused before decoding. */
     public static final int MAX_TOKEN_LENGTH = 8192;
@@ -57,6 +57,16 @@ public final class DefaultJwtAdmissionPolicy implements JwtAdmissionPolicy {
         this.skewSeconds = skewSeconds;
         this.tenantClaim = Objects.requireNonNull(tenantClaim, "tenantClaim");
         this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    /** Stops the key set's background refresher; the keys held keep serving until maximum staleness. */
+    @Override
+    public void close() {
+        keySet.stop();
+    }
+
+    JwksKeySet keySet() {
+        return keySet;
     }
 
     @Override

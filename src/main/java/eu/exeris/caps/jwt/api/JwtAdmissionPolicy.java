@@ -9,9 +9,8 @@ package eu.exeris.caps.jwt.api;
  *
  * <p><b>Thread-safety:</b> a host calls the policy for each request, concurrently, so an implementation must be
  * safe for concurrent use. The default implementation (see {@link JwtAdmissionPolicies}) keeps no per-call
- * state; the key set it shares is published through volatile fields, and a JWKS reload runs under a lock, so
- * concurrent callers that find the keys stale or a {@code kid} unknown wait for one reload instead of starting
- * their own.
+ * state; the key set it shares is an immutable snapshot published through one volatile field, which a
+ * background refresher replaces; a call never waits for a reload.
  *
  * @since 0.1.0
  */
