@@ -42,13 +42,11 @@ jobs:
           java-version: ${{ matrix.java }}
           cache: maven
 
-      # Built with the SDK and tooling versions this cap pins, both resolved from Maven Central. Its
-      # committed manifest is not regenerated here; its own CI owns that check.
+      # Built with the versions its own POM pins. Its committed manifest is not regenerated here; its
+      # own CI owns that check.
       - name: Install exeris-caps-service-boundary-core to the local repository
         working-directory: exeris-caps-service-boundary-core
-        run: >-
-          mvn -B -ntp -DskipTests -Dexeris.codegen.skip=true
-          -Dexeris.sdk.version=0.12.0 -Dexeris.tooling.version=0.10.0 install
+        run: mvn -B -ntp -DskipTests -Dexeris.codegen.skip=true install
 
       # Two passes, and the first is not redundant: exeris:generate runs at generate-sources, but the
       # processor writes the capability metadata it reads only during compile.

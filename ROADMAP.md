@@ -59,6 +59,6 @@ rule; the code is `src/main/java/eu/exeris/caps/jwt/api/JwtPrincipal.java` and
 ### Release workflow and API baseline
 
 No artefact is published: `.github/workflows/` holds the build and the guardrail gates and no release
-job, and the capability builds against `exeris-kernel` 0.13.0-SNAPSHOT. The repository has no API golden
-or accepted-changes register, because no released version exists to take a baseline from. A release
-job and the first baseline wait on a released kernel 0.13.0 and on the 0.1.0 items above.
+job. The capability builds against the released `exeris-kernel` 0.13.1. The repository has no API golden
+or accepted-changes register, because no released version of it exists to take a baseline from. A release
+job and the first baseline wait on a publication target for the capability's own artefact.
