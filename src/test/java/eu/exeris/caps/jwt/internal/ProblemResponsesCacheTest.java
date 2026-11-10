@@ -43,9 +43,12 @@ class ProblemResponsesCacheTest {
     private static final List<HttpStatus> STATUSES = List.of(HttpStatus.UNAUTHORIZED, HttpStatus.FORBIDDEN,
             HttpStatus.TOO_MANY_REQUESTS, HttpStatus.SERVICE_UNAVAILABLE);
     private static final int THREADS = 16;
-    private static final int DETAIL_LENGTH = 4_000;
-    /** Far below the encoded length, far above a cached response's cost. */
-    private static final double CACHED_COST_CEILING_BYTES = 2_000.0;
+    private static final int DETAIL_LENGTH = 16_384;
+    /**
+     * Between a cached response's fixed cost (hundreds of bytes in any JIT state) and an uncached one
+     * (at least the encoded array, over sixteen thousand): a wide margin on both sides.
+     */
+    private static final double CACHED_COST_CEILING_BYTES = 4_096.0;
 
     private static MemoryAllocator base;
     /** Without leak detection, whose bookkeeping would swamp the heap figures being compared. */
@@ -129,20 +132,12 @@ class ProblemResponsesCacheTest {
         KernelAllocators.bound(base, () -> ProblemResponses.send(exchange, status, detail, CHALLENGE));
     }
 
-    /** Heap bytes per call on this thread for one status and detail, after a short warm-up. */
+    /** Smallest heap bytes per call on this thread for one status and detail, over a few short windows. */
     private static double heapPerResponse(HttpStatus status, String detail) {
-        var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
-        long thread = Thread.currentThread().threadId();
         HttpExchange exchange = releasing(null);
-        for (int i = 0; i < 5; i++) {
-            KernelAllocators.bound(meter, () -> ProblemResponses.send(exchange, status, detail, CHALLENGE));
-        }
-        int calls = 20;
-        long before = bean.getThreadAllocatedBytes(thread);
-        for (int i = 0; i < calls; i++) {
-            KernelAllocators.bound(meter, () -> ProblemResponses.send(exchange, status, detail, CHALLENGE));
-        }
-        return (bean.getThreadAllocatedBytes(thread) - before) / (double) calls;
+        return HeapMeter.minimum(5, 3, 5,
+                () -> KernelAllocators.bound(meter,
+                        () -> ProblemResponses.send(exchange, status, detail, CHALLENGE)));
     }
 
     private static boolean looksCached(HttpStatus status, String detail) {

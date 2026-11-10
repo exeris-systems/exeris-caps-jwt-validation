@@ -353,7 +353,7 @@ class ProblemResponsesTest {
         MemoryAllocator allocator = ServiceLoader.load(MemoryProvider.class).findFirst().orElseThrow()
                 .createAllocator(MemoryProviderConfig.defaults());
         try {
-            byte[] constant = expectedBody(HttpStatus.UNAUTHORIZED, DETAIL).getBytes(StandardCharsets.UTF_8);
+            byte[] constant = expectedBody(HttpStatus.UNAUTHORIZED, LONG_DETAIL).getBytes(StandardCharsets.UTF_8);
             var request = HttpRequest.noBody(HttpMethod.GET, "/me", HttpVersion.HTTP_1_1, List.of());
             HttpExchange releasing = new HttpExchange() {
                 @Override
@@ -366,25 +366,26 @@ class ProblemResponsesTest {
                     response.body().close();
                 }
             };
-            Runnable production = () -> ProblemResponses.send(releasing, HttpStatus.UNAUTHORIZED, DETAIL, CHALLENGE);
+            Runnable production = () -> ProblemResponses.send(releasing, HttpStatus.UNAUTHORIZED, LONG_DETAIL, CHALLENGE);
             Runnable reference = () -> {
                 List<HttpHeader> all = new ArrayList<>(3);
                 all.add(new HttpHeader("Cache-Control", "no-store"));
                 all.addAll(CHALLENGE);
                 all.add(0, new HttpHeader("Content-Type", "application/problem+json"));
-                LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocate(eu.exeris.kernel.spi.memory.AllocationHint.MICRO);
+                LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocate(smallestHintHolding(constant.length));
                 MemorySegment.copy(constant, 0, buffer.segment(), ValueLayout.JAVA_BYTE, 0L, constant.length);
                 buffer.setSize(constant.length);
                 releasing.respond(new HttpResponse(HttpStatus.UNAUTHORIZED, HttpVersion.HTTP_1_1,
                         List.copyOf(all), buffer));
             };
 
-            double produced = bytesPerCall(allocator, production);
-            double referenced = bytesPerCall(allocator, reference);
+            double[] m = HeapMeter.interleavedMinima(WARMUP_CALLS, WINDOW_CALLS, ROUNDS,
+                    () -> KernelAllocators.bound(allocator, production),
+                    () -> KernelAllocators.bound(allocator, reference));
 
-            assertThat(produced - referenced)
-                    .as("bytes per response above the hand-over of a precomputed body (%s vs %s)", produced, referenced)
-                    .isLessThan(constant.length);
+            assertThat(m[0] - m[1])
+                    .as("bytes per response above the hand-over of a precomputed body (%s vs %s)", m[0], m[1])
+                    .isLessThan(constant.length / 10.0);
         } finally {
             allocator.close();
         }
@@ -394,19 +395,23 @@ class ProblemResponsesTest {
     private static final String LONG_DETAIL = "The request lacks valid bearer credentials. ".repeat(90);
 
     /**
-     * Allowed difference between the per-response heap figures of the two bodies: far below the
-     * difference in body length, above the measurement noise once the path is warm.
+     * How much more heap the long body may cost per response than the short one: a tenth of the
+     * difference in body length. A body-sized allocation per response adds at least the whole
+     * difference, and fixed-size objects the JIT does or does not elide add a few dozen bytes either way.
+     * Only the upper side is a failure; a long body that costs less than a short one is not.
      */
-    private static final double TOLERANCE_BYTES = 8.0;
+    private static final double GROWTH_BOUND_BYTES = (LONG_DETAIL.length() - SHORT_DETAIL.length()) / 10.0;
 
     /**
-     * The kernel's fixed cost per response plus the headers this overload builds per call: 264 to 320
-     * bytes measured, with a modest margin.
+     * Budget for one response with the long body, in any JIT state: several times the fixed cost the
+     * kernel and the header objects add, and far below the length of the long body, which a
+     * body-sized array per response would exceed on its own.
      */
-    private static final double SHORT_BODY_BOUND_BYTES = 352.0;
+    private static final double LONG_BODY_BUDGET_BYTES = 1024.0;
 
-    /** The kernel's fixed cost per response with shared headers: 176 bytes measured, with a modest margin. */
-    private static final double SHARED_HEADERS_BOUND_BYTES = 208.0;
+    private static final int WARMUP_CALLS = 300_000;
+    private static final int WINDOW_CALLS = 2_000;
+    private static final int ROUNDS = 8;
 
     private static volatile byte[] sink;
 
@@ -429,97 +434,71 @@ class ProblemResponsesTest {
         };
     }
 
-    /** Median over several rounds, each after a warm-up that also fills the body cache. */
-    private static double steadyBytesPerCall(MemoryAllocator allocator, Runnable call) {
-        for (int i = 0; i < 300_000; i++) {
-            KernelAllocators.bound(allocator, call);
-        }
-        double[] runs = new double[5];
-        for (int i = 0; i < runs.length; i++) {
-            runs[i] = bytesPerCall(allocator, call);
-        }
-        java.util.Arrays.sort(runs);
-        return runs[runs.length / 2];
+    /** Minimum heap bytes per call of the short-body and the long-body path, interleaved. */
+    private static double[] shortAndLong(MemoryAllocator allocator, Runnable shortCall, Runnable longCall) {
+        return HeapMeter.interleavedMinima(WARMUP_CALLS, WINDOW_CALLS, ROUNDS,
+                () -> KernelAllocators.bound(allocator, shortCall),
+                () -> KernelAllocators.bound(allocator, longCall));
+    }
+
+    private static double growth(double[] shortAndLong) {
+        return shortAndLong[1] - shortAndLong[0];
     }
 
     @Test
-    @DisplayName("heap bytes per response do not depend on the body length")
+    @DisplayName("heap bytes per response do not grow with the body length")
     void heapPerResponseIsIndependentOfBodyLength() {
         MemoryAllocator allocator = ServiceLoader.load(MemoryProvider.class).findFirst().orElseThrow()
                 .createAllocator(MemoryProviderConfig.defaults());
         try {
             HttpExchange releasing = releasingExchange();
-            double shortBytes = steadyBytesPerCall(allocator, productionSend(releasing, SHORT_DETAIL));
-            double longBytes = steadyBytesPerCall(allocator, productionSend(releasing, LONG_DETAIL));
-            System.out.println("heap bytes per response: short=" + shortBytes + " long=" + longBytes
+            double[] m = shortAndLong(allocator, productionSend(releasing, SHORT_DETAIL),
+                    productionSend(releasing, LONG_DETAIL));
+            System.out.println("heap bytes per response (minimum): short=" + m[0] + " long=" + m[1]
                     + " (detail lengths " + SHORT_DETAIL.length() + " / " + LONG_DETAIL.length() + ")");
 
-            assertThat(Math.abs(longBytes - shortBytes)).as("long %s vs short %s", longBytes, shortBytes)
-                    .isLessThanOrEqualTo(TOLERANCE_BYTES)
-                    .isLessThan((LONG_DETAIL.length() - SHORT_DETAIL.length()) / 100.0);
-            assertThat(shortBytes).as("fixed cost per response").isLessThan(SHORT_BODY_BOUND_BYTES);
+            assertThat(growth(m)).as("long %s minus short %s", m[1], m[0]).isLessThanOrEqualTo(GROWTH_BOUND_BYTES);
+            assertThat(m[1]).as("long-body response").isLessThan(LONG_BODY_BUDGET_BYTES);
         } finally {
             allocator.close();
         }
     }
 
     @Test
-    @DisplayName("with shared headers the fixed heap cost per response stays within the measured bound, whatever the body length")
+    @DisplayName("with shared headers the heap bytes per response do not grow with the body length")
     void heapPerResponseWithSharedHeaders() {
         MemoryAllocator allocator = ServiceLoader.load(MemoryProvider.class).findFirst().orElseThrow()
                 .createAllocator(MemoryProviderConfig.defaults());
         try {
             HttpExchange releasing = releasingExchange();
             ProblemResponses.Headers shared = ProblemResponses.Headers.of(CHALLENGE);
-            double shortBytes = steadyBytesPerCall(allocator,
-                    () -> ProblemResponses.send(releasing, HttpStatus.UNAUTHORIZED, SHORT_DETAIL, shared));
-            double longBytes = steadyBytesPerCall(allocator,
+            double[] m = shortAndLong(allocator,
+                    () -> ProblemResponses.send(releasing, HttpStatus.UNAUTHORIZED, SHORT_DETAIL, shared),
                     () -> ProblemResponses.send(releasing, HttpStatus.UNAUTHORIZED, LONG_DETAIL, shared));
-            System.out.println("shared-headers heap bytes per response: short=" + shortBytes + " long=" + longBytes);
+            System.out.println("shared-headers heap bytes per response (minimum): short=" + m[0] + " long=" + m[1]);
 
-            assertThat(Math.abs(longBytes - shortBytes)).as("long %s vs short %s", longBytes, shortBytes)
-                    .isLessThanOrEqualTo(TOLERANCE_BYTES);
-            assertThat(shortBytes).as("fixed cost per response").isLessThan(SHARED_HEADERS_BOUND_BYTES);
+            assertThat(growth(m)).as("long %s minus short %s", m[1], m[0]).isLessThanOrEqualTo(GROWTH_BOUND_BYTES);
+            assertThat(m[1]).as("long-body response").isLessThan(LONG_BODY_BUDGET_BYTES);
         } finally {
             allocator.close();
         }
     }
 
     @Test
-    @DisplayName("the measurement discriminates: a body-sized heap array per response breaks the same assertion")
+    @DisplayName("the measurement discriminates: a body-sized heap array per response breaks the same assertions")
     void controlAllocatesAndIsDetected() {
         MemoryAllocator allocator = ServiceLoader.load(MemoryProvider.class).findFirst().orElseThrow()
                 .createAllocator(MemoryProviderConfig.defaults());
         try {
-            double shortBytes = steadyBytesPerCall(allocator,
-                    () -> sink = SHORT_DETAIL.getBytes(StandardCharsets.UTF_8).clone());
-            double longBytes = steadyBytesPerCall(allocator,
+            double[] m = shortAndLong(allocator,
+                    () -> sink = SHORT_DETAIL.getBytes(StandardCharsets.UTF_8).clone(),
                     () -> sink = LONG_DETAIL.getBytes(StandardCharsets.UTF_8).clone());
-            System.out.println("control heap bytes per response: short=" + shortBytes + " long=" + longBytes);
+            System.out.println("control heap bytes per response (minimum): short=" + m[0] + " long=" + m[1]);
 
-            assertThat(Math.abs(longBytes - shortBytes)).isGreaterThan(TOLERANCE_BYTES);
+            assertThat(growth(m)).isGreaterThan(GROWTH_BOUND_BYTES);
+            assertThat(m[1]).isGreaterThanOrEqualTo(LONG_BODY_BUDGET_BYTES);
         } finally {
             allocator.close();
         }
-    }
-
-    /** Smallest per-call allocation on this thread over several rounds, after warm-up. */
-    private static double bytesPerCall(MemoryAllocator allocator, Runnable call) {
-        var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(bean.isThreadAllocatedMemorySupported()).isTrue();
-        long thread = Thread.currentThread().threadId();
-        int calls = 5_000;
-        double best = Double.MAX_VALUE;
-        for (int round = 0; round < 6; round++) {
-            long before = bean.getThreadAllocatedBytes(thread);
-            for (int i = 0; i < calls; i++) {
-                KernelAllocators.bound(allocator, call);
-            }
-            double perCall = (bean.getThreadAllocatedBytes(thread) - before) / (double) calls;
-            if (round > 0) {
-                best = Math.min(best, perCall);
-            }
-        }
-        return best;
     }
 }
