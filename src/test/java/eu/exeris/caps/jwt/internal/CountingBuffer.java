@@ -28,7 +28,9 @@ public final class CountingBuffer implements LoanedBuffer {
 
     @Override
     public MemorySegment segment() {
-        return delegate.segment();
+        return reportedCapacity >= 0 && reportedCapacity < delegate.segment().byteSize()
+                ? delegate.segment().asSlice(0, reportedCapacity)
+                : delegate.segment();
     }
 
     @Override

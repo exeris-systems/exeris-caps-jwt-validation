@@ -19,28 +19,57 @@ public final class TrackingAllocator implements MemoryAllocator {
     private final MemoryAllocator base;
     private final boolean shortCapacity;
     private final boolean failSetSize;
+    private final boolean dirty;
+    private final AtomicInteger networkCalls = new AtomicInteger();
     private final AtomicInteger finalReleases = new AtomicInteger();
     private final List<CountingBuffer> buffers = Collections.synchronizedList(new ArrayList<>());
     private final List<Integer> requestedSizes = Collections.synchronizedList(new ArrayList<>());
+    private final List<AllocationHint> requestedHints = Collections.synchronizedList(new ArrayList<>());
 
     public TrackingAllocator(MemoryAllocator base) {
-        this(base, false, false);
+        this(base, false, false, false);
     }
 
-    private TrackingAllocator(MemoryAllocator base, boolean shortCapacity, boolean failSetSize) {
+    private TrackingAllocator(MemoryAllocator base, boolean shortCapacity, boolean failSetSize, boolean dirty) {
         this.base = base;
         this.shortCapacity = shortCapacity;
         this.failSetSize = failSetSize;
+        this.dirty = dirty;
     }
 
-    /** An allocator whose buffers report one byte less capacity than was requested. */
+    /** An allocator whose buffers report a capacity below any body, as a faulty driver might. */
     public static TrackingAllocator withShortCapacity(MemoryAllocator base) {
-        return new TrackingAllocator(base, true, false);
+        return new TrackingAllocator(base, true, false, false);
     }
 
     /** An allocator whose buffers throw from {@code setSize}. */
     public static TrackingAllocator withFailingSetSize(MemoryAllocator base) {
-        return new TrackingAllocator(base, false, true);
+        return new TrackingAllocator(base, false, true, false);
+    }
+
+    /**
+     * An allocator that hands out exactly what a hint guarantees and nothing more: the buffer reports a
+     * capacity of {@code hint.sizeBytes()}, its segment is confined to that many bytes so a write past
+     * the guarantee fails, and every byte of it holds a non-zero pattern so a reader that assumes zeroed
+     * memory is caught.
+     */
+    public static TrackingAllocator withDirtyBuffers(MemoryAllocator base) {
+        return new TrackingAllocator(base, false, false, true);
+    }
+
+    /** The byte every position of a dirty buffer holds when it is handed out. */
+    public static final byte DIRTY = (byte) 0xA5;
+
+    /** Number of times the byte-size network allocation was asked for. */
+    public int networkCalls() {
+        return networkCalls.get();
+    }
+
+    /** The hints passed to {@code allocate}, in call order. */
+    public List<AllocationHint> hints() {
+        synchronized (requestedHints) {
+            return List.copyOf(requestedHints);
+        }
     }
 
     public int allocations() {
@@ -69,7 +98,13 @@ public final class TrackingAllocator implements MemoryAllocator {
 
     private LoanedBuffer track(LoanedBuffer real, long requested) {
         real.addCloseAction(finalReleases::incrementAndGet);
-        long reported = shortCapacity ? requested - 1 : -1;
+        long reported = shortCapacity ? 0 : dirty ? requested : -1;
+        if (dirty) {
+            if (real.capacity() < requested) {
+                throw new AssertionError("the real allocator broke its hint guarantee");
+            }
+            real.segment().asSlice(0, requested).fill(DIRTY);
+        }
         CountingBuffer wrapped = new CountingBuffer(real, reported, failSetSize);
         buffers.add(wrapped);
         return wrapped;
@@ -77,13 +112,15 @@ public final class TrackingAllocator implements MemoryAllocator {
 
     @Override
     public LoanedBuffer allocateNetwork(int estimatedBytes) {
+        networkCalls.incrementAndGet();
         requestedSizes.add(estimatedBytes);
-        return track(base.allocateNetwork(estimatedBytes), estimatedBytes);
+        throw new AssertionError("allocateNetwork(" + estimatedBytes + ") was called; a body is allocated by hint");
     }
 
     @Override
     public LoanedBuffer allocate(AllocationHint hint) {
         requestedSizes.add(hint.sizeBytes());
+        requestedHints.add(hint);
         return track(base.allocate(hint), hint.sizeBytes());
     }
 

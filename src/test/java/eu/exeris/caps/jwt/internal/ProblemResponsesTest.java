@@ -53,6 +53,15 @@ class ProblemResponsesTest {
                 + ",\"detail\":\"" + detail + "\"}";
     }
 
+    /** The smallest body hint (never SESSION) whose size holds the length, derived from the enum alone. */
+    static eu.exeris.kernel.spi.memory.AllocationHint smallestHintHolding(int length) {
+        return java.util.Arrays.stream(eu.exeris.kernel.spi.memory.AllocationHint.values())
+                .filter(h -> h != eu.exeris.kernel.spi.memory.AllocationHint.SESSION)
+                .filter(h -> h.sizeBytes() >= length)
+                .min(java.util.Comparator.comparingInt(eu.exeris.kernel.spi.memory.AllocationHint::sizeBytes))
+                .orElseThrow();
+    }
+
     private static RecordingExchange exchange(HttpVersion version, RecordingExchange.Mode mode) {
         return new RecordingExchange(HttpMethod.GET, "/me", List.of(), version, mode);
     }
@@ -124,7 +133,7 @@ class ProblemResponsesTest {
     }
 
     @Test
-    @DisplayName("the body is one kernel allocation of exactly the encoded length, and it is the buffer handed over")
+    @DisplayName("the body is one allocation under the smallest holding hint, sized to the encoded length, and it is the buffer handed over")
     void kernelBufferOnly() {
         TrackingAllocator allocator = new TrackingAllocator(base);
         RecordingExchange exchange = exchange(HttpVersion.HTTP_1_1, RecordingExchange.Mode.RELEASE_DEFERRED);
@@ -133,7 +142,10 @@ class ProblemResponsesTest {
 
         int length = expectedBody(HttpStatus.UNAUTHORIZED, DETAIL).getBytes(StandardCharsets.UTF_8).length;
         assertThat(allocator.allocations()).isEqualTo(1);
-        assertThat(allocator.requestedSizes()).containsExactly(length);
+        assertThat(allocator.hints()).containsExactly(smallestHintHolding(length));
+        assertThat(allocator.networkCalls()).isZero();
+        assertThat(exchange.bodySizeAtRespond).isEqualTo(length);
+        assertThat(exchange.bodyCapacityAtRespond).isGreaterThan(length);
         assertThat(exchange.response.body()).isSameAs(allocator.buffers().getFirst());
         assertThat(exchange.response.body().segment().isNative()).isTrue();
         exchange.completeDeferred();
@@ -360,7 +372,7 @@ class ProblemResponsesTest {
                 all.add(new HttpHeader("Cache-Control", "no-store"));
                 all.addAll(CHALLENGE);
                 all.add(0, new HttpHeader("Content-Type", "application/problem+json"));
-                LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocateNetwork(constant.length);
+                LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocate(eu.exeris.kernel.spi.memory.AllocationHint.MICRO);
                 MemorySegment.copy(constant, 0, buffer.segment(), ValueLayout.JAVA_BYTE, 0L, constant.length);
                 buffer.setSize(constant.length);
                 releasing.respond(new HttpResponse(HttpStatus.UNAUTHORIZED, HttpVersion.HTTP_1_1,
