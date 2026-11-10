@@ -88,7 +88,7 @@ public final class JwksKeySet {
     private final CountDownLatch firstAttempt = new CountDownLatch(1);
     /** Guards start and stop only, never the request path. */
     private final Object lifecycle = new Object();
-    private Thread refresher;
+    private volatile Thread refresher;
     private volatile boolean stopped;
     private long awaitNanos;
     // Confined to the refresher thread.
