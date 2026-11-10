@@ -88,6 +88,7 @@ public final class JwksKeySet {
     private final CountDownLatch firstAttempt = new CountDownLatch(1);
     /** Guards start and stop only, never the request path. */
     private final Object lifecycle = new Object();
+    /** Written once under {@link #lifecycle}, before the thread starts; read without it on the request path. */
     private volatile Thread refresher;
     private volatile boolean stopped;
     private long awaitNanos;
@@ -241,7 +242,13 @@ public final class JwksKeySet {
                 return;
             }
             awaitNanos = awaitFirstLoadNanos;
-            refresher = Thread.ofVirtual().name(REFRESHER_NAME).start(this::run);
+            // The reference is published before the thread runs. A lookup writes the request flag and then
+            // reads this reference; the refresher reads the flag only after this write. So a lookup that
+            // finds no thread to unpark has set the flag before the refresher's first read of it, and a
+            // lookup that finds the thread unparks it: a request is never both unseen and unsignalled.
+            Thread thread = Thread.ofVirtual().name(REFRESHER_NAME).unstarted(this::run);
+            refresher = thread;
+            thread.start();
         }
         try {
             firstAttempt.await(awaitFirstLoadNanos, TimeUnit.NANOSECONDS);

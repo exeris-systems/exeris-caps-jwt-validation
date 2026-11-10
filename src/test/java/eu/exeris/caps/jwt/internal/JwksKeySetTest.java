@@ -94,6 +94,30 @@ class JwksKeySetTest {
     }
 
     @Test
+    @DisplayName("the refresher is reachable for a wake-up from its first fetch on")
+    void refresherIsPublishedBeforeItRuns() throws Exception {
+        AtomicLong clock = new AtomicLong(0);
+        AtomicReference<JwksKeySet> holder = new AtomicReference<>();
+        AtomicBoolean publishedDuringFirstFetch = new AtomicBoolean();
+        CountDownLatch assigned = new CountDownLatch(1);
+        JwksKeySet keySet = JwksKeySet.fromSource(() -> {
+            try {
+                assigned.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            publishedDuringFirstFetch.compareAndSet(false, holder.get().isRefresherAlive());
+            return one();
+        }, 300 * SECOND, 30 * SECOND, 600 * SECOND, clock::get);
+        holder.set(keySet);
+        assigned.countDown();
+        begin(keySet);
+
+        assertThat(keySet.find("k1")).isPresent();
+        assertThat(publishedDuringFirstFetch).isTrue();
+    }
+
+    @Test
     @DisplayName("the source is only ever called on the named virtual refresher thread")
     void findNeverCallsSourceOnTheCallingThread() throws Exception {
         AtomicLong clock = new AtomicLong(0);
