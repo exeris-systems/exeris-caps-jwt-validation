@@ -13,7 +13,9 @@ import java.lang.foreign.ValueLayout;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Writes RFC 9457 problem responses ({@code application/problem+json}).
@@ -26,7 +28,41 @@ import java.util.List;
  */
 public final class ProblemResponses {
 
+    private static final ConcurrentHashMap<String, Body[]> BODIES = new ConcurrentHashMap<>();
+
+    private record Body(HttpStatus status, byte[] bytes) {
+    }
+
     private ProblemResponses() {
+    }
+
+    /**
+     * Returns the encoded body for a status and detail, building it once per pair. The returned array is
+     * shared and is only ever read, never handed to the kernel or exposed as writable memory.
+     */
+    private static byte[] bodyFor(HttpStatus status, String detail) {
+        Body[] known = BODIES.get(detail);
+        if (known != null) {
+            for (Body body : known) {
+                if (body.status().equals(status)) {
+                    return body.bytes();
+                }
+            }
+        }
+        byte[] bytes = ("{\"type\":\"about:blank\",\"title\":\"" + status.reasonPhrase()
+                + "\",\"status\":" + status.code() + ",\"detail\":\"" + detail + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        BODIES.merge(detail, new Body[] {new Body(status, bytes)}, (old, added) -> {
+            for (Body body : old) {
+                if (body.status().equals(status)) {
+                    return old;
+                }
+            }
+            Body[] grown = Arrays.copyOf(old, old.length + 1);
+            grown[old.length] = added[0];
+            return grown;
+        });
+        return bytes;
     }
 
     /**
@@ -52,9 +88,7 @@ public final class ProblemResponses {
             exchange.respond(HttpResponse.noBody(status, version, List.copyOf(all)));
             return;
         }
-        byte[] bytes = ("{\"type\":\"about:blank\",\"title\":\"" + status.reasonPhrase()
-                + "\",\"status\":" + status.code() + ",\"detail\":\"" + detail + "\"}")
-                .getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = bodyFor(status, detail);
         all.add(0, new HttpHeader("Content-Type", "application/problem+json"));
         LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocateNetwork(bytes.length);
         boolean handedOver = false;
