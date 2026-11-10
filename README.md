@@ -2,7 +2,7 @@
 
 JWT admission as an Exeris capability. It provides `JwtAdmissionPolicy`, which verifies a compact JWS access token against the issuer's published keys, fetched by the capability itself from the configured `jwks-uri` within the bounds in [JWKS fetch](#jwks-fetch), and the admission filter that runs that check on a Service Boundary request and records the verified caller in its `RequestContext`. It binds inbound only through the Service Boundary admission filter and owns no other inbound transport.
 
-Status: proof of concept, built against `exeris-kernel` 0.13.0-SNAPSHOT. The API is not stable and no artefact has been published.
+Status: proof of concept, built against `exeris-kernel` 0.13.1. The API is not stable and no artefact has been published.
 
 ## Where it sits
 
@@ -72,7 +72,7 @@ mvn verify                               # pass 2 — generate cap-manifest.json
 
 Both passes are needed after a `clean`: `exeris:generate` runs before `compile`, and `compile` is when the processor writes the metadata it reads. `src/main/generated/java/cap-manifest.json` is committed, so a clean `git status` after `mvn verify` shows the manifest matches the declaration.
 
-`exeris-tooling` 0.10.0 and `exeris-sdk` 0.12.0 resolve from Maven Central, `exeris-caps-service-boundary-core` is built from its `main` branch, and `exeris-kernel` 0.13.0-SNAPSHOT is resolved from GitHub Packages, which needs a token with `read:packages`. [`.github/workflows/build.yml`](.github/workflows/build.yml) is the exact sequence, and [`.github/maven-settings.xml`](.github/maven-settings.xml) the repository configuration it uses.
+`exeris-kernel` 0.13.1, `exeris-sdk` 0.13.3 and `exeris-tooling` 0.11.0 resolve from Maven Central and need no token; `exeris-caps-service-boundary-core` is built from its `main` branch first. [`.github/workflows/build.yml`](.github/workflows/build.yml) is the exact sequence.
 
 ## Documentation
 
