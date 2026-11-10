@@ -6,6 +6,7 @@ import eu.exeris.kernel.spi.http.HttpResponse;
 import eu.exeris.kernel.spi.http.HttpStatus;
 import eu.exeris.kernel.spi.http.HttpVersion;
 import eu.exeris.kernel.spi.context.KernelProviders;
+import eu.exeris.kernel.spi.memory.AllocationHint;
 import eu.exeris.kernel.spi.memory.LoanedBuffer;
 
 import java.lang.foreign.MemorySegment;
@@ -156,13 +157,48 @@ public final class ProblemResponses {
         respondWithBody(exchange, status, version, bodyFor(status, detail), headers.withBody());
     }
 
+    /**
+     * Hints a body may be written under, smallest first. The allocator guarantees a buffer of at least
+     * {@link AllocationHint#sizeBytes()} bytes for each. {@code SESSION} is per-session crypto context
+     * and is not a body size.
+     */
+    private static final AllocationHint[] BODY_HINTS = {
+        AllocationHint.MICRO, AllocationHint.SMALL, AllocationHint.MEDIUM,
+        AllocationHint.STREAMING_CHUNK, AllocationHint.NETWORK_FRAME, AllocationHint.JUMBO
+    };
+
+    /**
+     * Returns the smallest hint whose {@link AllocationHint#sizeBytes()} holds a body of the given
+     * length.
+     *
+     * <p>Every body written here is a fixed-shape problem document: a reason phrase, a status code and
+     * a fixed detail text chosen by this capability, a few hundred bytes at most. None can exceed the
+     * largest hint, so a longer body is a programming error and is refused before any allocation
+     * rather than truncated.
+     *
+     * @param length body length in bytes
+     * @return the hint to allocate under
+     * @throws IllegalArgumentException if the length is negative or exceeds the largest hint
+     */
+    static AllocationHint hintFor(int length) {
+        if (length >= 0) {
+            for (AllocationHint hint : BODY_HINTS) {
+                if (hint.sizeBytes() >= length) {
+                    return hint;
+                }
+            }
+        }
+        throw new IllegalArgumentException("problem body of " + length + " bytes does not fit any allocation hint");
+    }
+
     private static void respondWithBody(HttpExchange exchange, HttpStatus status, HttpVersion version,
             byte[] bytes, List<HttpHeader> headers) {
-        LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocateNetwork(bytes.length);
+        AllocationHint hint = hintFor(bytes.length);
+        LoanedBuffer buffer = KernelProviders.MEMORY_ALLOCATOR.get().allocate(hint);
         boolean handedOver = false;
         try {
             if (buffer.capacity() < bytes.length) {
-                throw new IllegalStateException("allocator returned a buffer smaller than requested");
+                throw new IllegalStateException("allocator returned a buffer smaller than its hint");
             }
             MemorySegment.copy(bytes, 0, buffer.segment(), ValueLayout.JAVA_BYTE, 0L, bytes.length);
             buffer.setSize(bytes.length);
