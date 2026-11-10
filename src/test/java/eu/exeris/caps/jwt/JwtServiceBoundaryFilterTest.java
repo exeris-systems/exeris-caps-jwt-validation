@@ -4,7 +4,9 @@ import eu.exeris.caps.jwt.api.JwtAdmissionPolicies;
 import eu.exeris.caps.jwt.api.JwtAdmissionPolicy;
 import eu.exeris.caps.jwt.api.JwtPrincipal;
 import eu.exeris.caps.jwt.api.JwtServiceBoundaryBinding;
+import eu.exeris.caps.jwt.internal.KernelAllocators;
 import eu.exeris.caps.jwt.internal.RecordingExchange;
+import eu.exeris.caps.jwt.internal.TrackingAllocator;
 import eu.exeris.caps.jwt.internal.TestTokens;
 import eu.exeris.caps.serviceboundarycore.ServiceBoundaryCoreModule;
 import eu.exeris.caps.serviceboundarycore.api.ApiSurfaceRegistry;
@@ -13,6 +15,10 @@ import eu.exeris.caps.serviceboundarycore.api.RequestContext;
 import eu.exeris.kernel.spi.http.HttpHeader;
 import eu.exeris.kernel.spi.http.HttpMethod;
 import eu.exeris.kernel.spi.http.HttpStatus;
+import eu.exeris.kernel.spi.http.HttpVersion;
+import eu.exeris.kernel.spi.memory.MemoryAllocator;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -36,12 +42,26 @@ class JwtServiceBoundaryFilterTest {
 
     private static final KeyPair ED = TestTokens.ed25519();
 
+    private static MemoryAllocator base;
+
+    private TrackingAllocator allocator;
     private ApiSurfaceRegistry registry;
     private JwtValidationModule module;
     private final AtomicReference<RequestContext> seen = new AtomicReference<>();
 
+    @BeforeAll
+    static void openAllocator() {
+        base = KernelAllocators.create();
+    }
+
+    @AfterAll
+    static void closeAllocator() {
+        base.close();
+    }
+
     @BeforeEach
     void setUp() {
+        allocator = new TrackingAllocator(base);
         ServiceBoundaryCoreModule sbc = new ServiceBoundaryCoreModule();
         registry = sbc.apiSurfaceRegistry();
         JwtAdmissionPolicy policy = JwtAdmissionPolicies.builder()
@@ -71,7 +91,7 @@ class JwtServiceBoundaryFilterTest {
     private RecordingExchange send(HttpMethod method, String path, String... authorization) {
         List<HttpHeader> headers = java.util.Arrays.stream(authorization).map(v -> new HttpHeader("Authorization", v)).toList();
         RecordingExchange exchange = new RecordingExchange(method, path, headers);
-        registry.handle(exchange);
+        KernelAllocators.bound(allocator, () -> registry.handle(exchange));
         return exchange;
     }
 
@@ -118,6 +138,48 @@ class JwtServiceBoundaryFilterTest {
         assertThat(exchange.body()).isEqualTo("{\"type\":\"about:blank\",\"title\":\"Unauthorized\",\"status\":401,"
                 + "\"detail\":\"The request lacks valid bearer credentials.\"}");
         assertThat(seen.get()).isNull();
+        assertThat(allocator.allocations()).isEqualTo(1);
+        assertThat(allocator.finalReleases()).isEqualTo(1);
+        assertThat(allocator.buffers().getFirst().closeCalls()).isEqualTo(1);
+        assertThat(exchange.header("Content-Length")).isIn(java.util.Optional.empty(),
+                java.util.Optional.of(String.valueOf(exchange.body().getBytes(java.nio.charset.StandardCharsets.UTF_8).length)));
+    }
+
+    @Test
+    @DisplayName("a refusal over HTTP/2 keeps its buffer alive past the filter until the engine releases it")
+    void refusalOverHttp2() {
+        RecordingExchange exchange = new RecordingExchange(HttpMethod.GET, "/me", List.of(), HttpVersion.HTTP_2,
+                RecordingExchange.Mode.RELEASE_DEFERRED);
+        KernelAllocators.bound(allocator, () -> registry.handle(exchange));
+
+        assertThat(exchange.status).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(exchange.response.version()).isEqualTo(HttpVersion.HTTP_2);
+        assertThat(allocator.buffers().getFirst().isAlive()).isTrue();
+        assertThat(allocator.buffers().getFirst().closeCalls()).isZero();
+        exchange.completeDeferred();
+        assertThat(allocator.outstanding()).isZero();
+        assertThat(exchange.body()).startsWith("{\"type\":\"about:blank\"");
+    }
+
+    @Test
+    @DisplayName("every refusal path (no token, bad token, two tokens) releases its buffer exactly once")
+    void everyRefusalReleasesOnce() {
+        String token = "Bearer " + TestTokens.eddsa("ed-1", ED.getPrivate(), TestTokens.validClaims());
+        send(HttpMethod.GET, "/me");
+        send(HttpMethod.GET, "/me", "Bearer not.a.token");
+        send(HttpMethod.GET, "/me", token, token);
+
+        assertThat(allocator.allocations()).isEqualTo(3);
+        assertThat(allocator.finalReleases()).isEqualTo(3);
+        assertThat(allocator.buffers()).allSatisfy(b -> assertThat(b.closeCalls()).isEqualTo(1));
+    }
+
+    @Test
+    @DisplayName("an admitted request allocates no response buffer")
+    void admittedRequestAllocatesNothing() {
+        send(HttpMethod.GET, "/me", "Bearer " + TestTokens.eddsa("ed-1", ED.getPrivate(), TestTokens.validClaims()));
+
+        assertThat(allocator.allocations()).isZero();
     }
 
     @Test
@@ -199,7 +261,7 @@ class JwtServiceBoundaryFilterTest {
 
         // First request: valid, 200 OK
         RecordingExchange ex1 = new RecordingExchange(HttpMethod.GET, "/profile", List.of(new HttpHeader("Authorization", authHeader)));
-        localRegistry.handle(ex1);
+        KernelAllocators.bound(allocator, () -> localRegistry.handle(ex1));
         assertThat(ex1.status).isEqualTo(HttpStatus.OK);
 
         // Fail subsequent fetches and advance past max staleness
@@ -208,7 +270,7 @@ class JwtServiceBoundaryFilterTest {
 
         // Second request: past max staleness, answers 401 UNAUTHORIZED
         RecordingExchange ex2 = new RecordingExchange(HttpMethod.GET, "/profile", List.of(new HttpHeader("Authorization", authHeader)));
-        localRegistry.handle(ex2);
+        KernelAllocators.bound(allocator, () -> localRegistry.handle(ex2));
         assertThat(ex2.status).isEqualTo(HttpStatus.UNAUTHORIZED);
         localModule.terminate();
     }

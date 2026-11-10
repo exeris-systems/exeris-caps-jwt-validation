@@ -78,6 +78,15 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- test only: a real allocator (and its leak accounting) for the response-body tests; no driver type
+             is named, the provider is found through ServiceLoader -->
+        <dependency>
+            <groupId>eu.exeris</groupId>
+            <artifactId>exeris-kernel-community</artifactId>
+            <version>${exeris.kernel.version}</version>
+            <scope>test</scope>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
