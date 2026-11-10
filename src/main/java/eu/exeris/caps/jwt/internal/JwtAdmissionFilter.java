@@ -35,9 +35,10 @@ public final class JwtAdmissionFilter implements AdmissionFilter {
     public static final String NAME = "jwt-validation";
 
     private static final String DETAIL = "The request lacks valid bearer credentials.";
-    private static final List<HttpHeader> CHALLENGE = List.of(new HttpHeader("WWW-Authenticate", "Bearer"));
-    private static final List<HttpHeader> INVALID_TOKEN_CHALLENGE =
-            List.of(new HttpHeader("WWW-Authenticate", "Bearer error=\"invalid_token\""));
+    private static final ProblemResponses.Headers CHALLENGE =
+            ProblemResponses.Headers.of(List.of(new HttpHeader("WWW-Authenticate", "Bearer")));
+    private static final ProblemResponses.Headers INVALID_TOKEN_CHALLENGE =
+            ProblemResponses.Headers.of(List.of(new HttpHeader("WWW-Authenticate", "Bearer error=\"invalid_token\"")));
 
     private final JwtAdmissionPolicy policy;
     private final Set<String> anonymousRoutes;
