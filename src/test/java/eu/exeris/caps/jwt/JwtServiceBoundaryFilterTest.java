@@ -16,6 +16,7 @@ import eu.exeris.kernel.spi.http.HttpHeader;
 import eu.exeris.kernel.spi.http.HttpMethod;
 import eu.exeris.kernel.spi.http.HttpStatus;
 import eu.exeris.kernel.spi.http.HttpVersion;
+import eu.exeris.kernel.spi.http.RouteRequirement;
 import eu.exeris.kernel.spi.memory.MemoryAllocator;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -80,6 +81,8 @@ class JwtServiceBoundaryFilterTest {
                     .method(HttpMethod.valueOf(parts[0]))
                     .pathPattern(parts[1])
                     .actionName(route)
+                    .requirements(List.of("GET /me".equals(route)
+                            ? RouteRequirement.authenticated() : RouteRequirement.permitAll()))
                     .handler(ex -> {
                         seen.set(RequestContext.current());
                         ex.respond(HttpStatus.OK);
@@ -254,6 +257,7 @@ class JwtServiceBoundaryFilterTest {
                 .method(HttpMethod.GET)
                 .pathPattern("/profile")
                 .actionName("GET /profile")
+                .requirements(List.of(RouteRequirement.authenticated()))
                 .handler(ex -> ex.respond(HttpStatus.OK))
                 .build());
 
