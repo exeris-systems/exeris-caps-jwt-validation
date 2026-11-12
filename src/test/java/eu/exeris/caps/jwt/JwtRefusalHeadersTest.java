@@ -13,6 +13,7 @@ import eu.exeris.caps.serviceboundarycore.api.ApiSurfaceRoute;
 import eu.exeris.kernel.spi.http.HttpHeader;
 import eu.exeris.kernel.spi.http.HttpMethod;
 import eu.exeris.kernel.spi.http.HttpStatus;
+import eu.exeris.kernel.spi.http.RouteRequirement;
 import eu.exeris.kernel.spi.memory.MemoryAllocator;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -67,6 +68,7 @@ class JwtRefusalHeadersTest {
                 .method(HttpMethod.GET)
                 .pathPattern("/me")
                 .actionName("GET /me")
+                .requirements(List.of(RouteRequirement.authenticated()))
                 .handler(ex -> ex.respond(HttpStatus.OK))
                 .build());
     }
